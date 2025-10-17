@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "import": "node importExcel.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "sqlite3": "^5.1.6",
     "node-fetch": "^2.6.7",
-    "body-parser": "^1.20.2"
+    "body-parser": "^1.20.2",
+    "xlsx": "^0.18.5"
   }
 }
