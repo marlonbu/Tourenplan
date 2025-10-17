@@ -1,43 +1,46 @@
 const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("./tourenplan.db");
+const db = new sqlite3.Database(":memory:");
 
+// Tabellen erstellen
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS fahrer (
-    fahrer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    benutzername TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL
-  )`);
+  // Fahrer
+  db.run(`
+    CREATE TABLE IF NOT EXISTS fahrer (
+      fahrer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT
+    )
+  `);
 
-  db.run(`CREATE TABLE IF NOT EXISTS touren (
-    tour_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    datum DATE NOT NULL,
-    fahrer_id INTEGER NOT NULL,
-    status TEXT DEFAULT 'geplant',
-    FOREIGN KEY (fahrer_id) REFERENCES fahrer(fahrer_id)
-  )`);
+  // Touren
+  db.run(`
+    CREATE TABLE IF NOT EXISTS touren (
+      tour_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      datum TEXT,
+      wochentag TEXT,
+      fahrer_id INTEGER,
+      ankunft TEXT,
+      kommission TEXT,
+      kundenadresse TEXT,
+      bemerkung TEXT,
+      status TEXT,
+      latitude REAL,
+      longitude REAL,
+      FOREIGN KEY(fahrer_id) REFERENCES fahrer(fahrer_id)
+    )
+  `);
 
-  db.run(`CREATE TABLE IF NOT EXISTS stops (
-    stop_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tour_id INTEGER NOT NULL,
-    ankunft TIME,
-    kommission TEXT,
-    kundenadresse TEXT NOT NULL,
-    longitude REAL,
-    latitude REAL,
-    bemerkung TEXT,
-    status TEXT DEFAULT 'offen',
-    FOREIGN KEY (tour_id) REFERENCES touren(tour_id)
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS stop_fotos (
-    foto_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stop_id INTEGER NOT NULL,
-    url TEXT NOT NULL,
-    beschreibung TEXT,
-    erstellt_am TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (stop_id) REFERENCES stops(stop_id)
-  )`);
+  // Tour-Stopps (falls mehrere Adressen pro Tour)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS tourstopps (
+      stopp_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tour_id INTEGER,
+      kundenadresse TEXT,
+      bemerkung TEXT,
+      latitude REAL,
+      longitude REAL,
+      FOREIGN KEY(tour_id) REFERENCES touren(tour_id)
+    )
+  `);
 });
 
 module.exports = db;
