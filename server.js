@@ -95,7 +95,7 @@ app.post("/scan", async (req, res) => {
   }
 });
 
-// Datei-Upload (Dummy: speichert nur Dateinamen)
+// Datei-Upload (Dummy)
 const upload = multer({ dest: "uploads/" });
 app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
   const stopp_id = req.params.stopp_id;
@@ -118,21 +118,18 @@ app.get("/seed", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Fahrer
     const fahrerResult = await client.query(
       "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
       ["Hans Mustermann"]
     );
     const fahrerId = fahrerResult.rows[0].id;
 
-    // Fahrzeug
     const fahrzeugResult = await client.query(
       "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
       ["Sprinter", "CLP-HG 123"]
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
-    // Tour für heute
     const heute = new Date().toISOString().slice(0, 10);
     const tourResult = await client.query(
       "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -140,7 +137,6 @@ app.get("/seed", async (req, res) => {
     );
     const tourId = tourResult.rows[0].id;
 
-    // Stopp
     await client.query(
       "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
       [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
@@ -162,8 +158,6 @@ app.get("/seed", async (req, res) => {
     client.release();
   }
 });
-
-// ========================= NEU: Touren & Stopps anlegen ========================= //
 
 // Neue Tour anlegen
 app.post("/touren", async (req, res) => {
@@ -192,6 +186,26 @@ app.post("/stopps", async (req, res) => {
   } catch (err) {
     console.error("❌ Fehler beim Anlegen des Stopps:", err);
     res.status(500).json({ error: "Fehler beim Anlegen des Stopps", details: err.message });
+  }
+});
+
+// ========================= NEU: Übersicht aller Daten ========================= //
+app.get("/all", async (req, res) => {
+  try {
+    const fahrer = await pool.query("SELECT * FROM fahrer");
+    const fahrzeuge = await pool.query("SELECT * FROM fahrzeuge");
+    const touren = await pool.query("SELECT * FROM touren");
+    const stopps = await pool.query("SELECT * FROM stopps");
+
+    res.json({
+      fahrer: fahrer.rows,
+      fahrzeuge: fahrzeuge.rows,
+      touren: touren.rows,
+      stopps: stopps.rows
+    });
+  } catch (err) {
+    console.error("❌ Fehler bei /all:", err);
+    res.status(500).json({ error: "Fehler beim Abrufen aller Daten" });
   }
 });
 
