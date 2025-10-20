@@ -110,6 +110,40 @@ app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
   }
 });
 
+// SEED-ENDPUNKT für Demodaten
+app.get("/seed", async (req, res) => {
+  try {
+    // Fahrer einfügen
+    const fahrer = await pool.query(
+      "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
+      ["Hans Mustermann"]
+    );
+
+    // Fahrzeug einfügen
+    const fahrzeug = await pool.query(
+      "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
+      ["Sprinter", "CLP-HG 123"]
+    );
+
+    // Tour einfügen (für heute)
+    const tour = await pool.query(
+      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [new Date().toISOString().slice(0, 10), fahrzeug.rows[0].id, fahrer.rows[0].id, "08:00", "Demo-Tour"]
+    );
+
+    // Stopp einfügen
+    await pool.query(
+      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
+      [tour.rows[0].id, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
+    );
+
+    res.json({ message: "✅ Demodaten wurden eingefügt!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Einfügen der Demodaten" });
+  }
+});
+
 // Startseite
 app.get("/", (req, res) => {
   res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
