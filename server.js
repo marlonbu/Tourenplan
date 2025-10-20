@@ -62,6 +62,8 @@ async function initDb() {
   }
 }
 
+// ========================= API ROUTES ========================= //
+
 // Touren für Fahrer abrufen
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
@@ -161,7 +163,39 @@ app.get("/seed", async (req, res) => {
   }
 });
 
-// Startseite
+// ========================= NEU: Touren & Stopps anlegen ========================= //
+
+// Neue Tour anlegen
+app.post("/touren", async (req, res) => {
+  const { datum, fahrer_id, fahrzeug_id, startzeit, bemerkung } = req.body;
+  try {
+    const result = await pool.query(
+      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+      [datum, fahrzeug_id, fahrer_id, startzeit, bemerkung]
+    );
+    res.json({ message: "✅ Tour angelegt", tour: result.rows[0] });
+  } catch (err) {
+    console.error("❌ Fehler beim Anlegen der Tour:", err);
+    res.status(500).json({ error: "Fehler beim Anlegen der Tour", details: err.message });
+  }
+});
+
+// Neuen Stopp anlegen
+app.post("/stopps", async (req, res) => {
+  const { tour_id, adresse, lat, lng, reihenfolge, qr_code } = req.body;
+  try {
+    const result = await pool.query(
+      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      [tour_id, adresse, lat, lng, reihenfolge, qr_code]
+    );
+    res.json({ message: "✅ Stopp angelegt", stopp: result.rows[0] });
+  } catch (err) {
+    console.error("❌ Fehler beim Anlegen des Stopps:", err);
+    res.status(500).json({ error: "Fehler beim Anlegen des Stopps", details: err.message });
+  }
+});
+
+// ========================= Root ========================= //
 app.get("/", (req, res) => {
   res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
 });
