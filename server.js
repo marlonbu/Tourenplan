@@ -19,7 +19,7 @@ async function initDb() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
+        name TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS fahrzeuge (
@@ -138,18 +138,24 @@ app.get("/reset", async (req, res) => {
   }
 });
 
-// Seed-Demo mit Zufallsdaten
+// Seed-Demo mit Christoph Arlt + Stopps
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer Christoph Arlt sicherstellen
-    const fahrerResult = await client.query(
-      "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-      ["Christoph Arlt"]
-    );
-    const fahrerId = fahrerResult.rows[0].id;
+    // Fahrer Christoph Arlt sicherstellen (ohne ON CONFLICT)
+    let fahrerResult = await client.query("SELECT id FROM fahrer WHERE name = $1", ["Christoph Arlt"]);
+    let fahrerId;
+    if (fahrerResult.rows.length > 0) {
+      fahrerId = fahrerResult.rows[0].id;
+    } else {
+      fahrerResult = await client.query(
+        "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
+        ["Christoph Arlt"]
+      );
+      fahrerId = fahrerResult.rows[0].id;
+    }
 
     // Fahrzeug
     const fahrzeugResult = await client.query(
@@ -169,7 +175,7 @@ app.get("/seed-demo", async (req, res) => {
     );
     const tourId = tourResult.rows[0].id;
 
-    // Stopps mit Zufallsdaten
+    // Stopps mit Zusatzinfos
     const stopps = [
       {
         adresse: "Bahnhofstraße 10, 49699 Lindern",
