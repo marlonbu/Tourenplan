@@ -62,9 +62,33 @@ async function initDb() {
   }
 }
 
-// ========================= API ROUTES ========================= //
+/* ===========================
+   📌 API ENDPOINTS
+=========================== */
 
-// Touren für Fahrer abrufen
+// Fahrer-Liste
+app.get("/fahrer", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT id, name FROM fahrer ORDER BY id");
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
+  }
+});
+
+// Fahrzeuge-Liste
+app.get("/fahrzeuge", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT id, typ, kennzeichen FROM fahrzeuge ORDER BY id");
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Laden der Fahrzeuge" });
+  }
+});
+
+// Touren eines Fahrers für bestimmtes Datum
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
@@ -83,7 +107,7 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   }
 });
 
-// QR-Code Check-in
+// QR-Code Check-in (Stopp erledigen)
 app.post("/scan", async (req, res) => {
   const { stopp_id } = req.body;
   try {
@@ -95,7 +119,7 @@ app.post("/scan", async (req, res) => {
   }
 });
 
-// Datei-Upload (Dummy)
+// Datei-Upload (Dummy-Version)
 const upload = multer({ dest: "uploads/" });
 app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
   const stopp_id = req.params.stopp_id;
@@ -112,116 +136,7 @@ app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
   }
 });
 
-// SEED-Endpunkt für Demodaten
-app.get("/seed", async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const fahrerResult = await client.query(
-      "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
-      ["Hans Mustermann"]
-    );
-    const fahrerId = fahrerResult.rows[0].id;
-
-    const fahrzeugResult = await client.query(
-      "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
-      ["Sprinter", "CLP-HG 123"]
-    );
-    const fahrzeugId = fahrzeugResult.rows[0].id;
-
-    const heute = new Date().toISOString().slice(0, 10);
-    const tourResult = await client.query(
-      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-      [heute, fahrzeugId, fahrerId, "08:00", "Demo-Tour"]
-    );
-    const tourId = tourResult.rows[0].id;
-
-    await client.query(
-      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
-      [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
-    );
-
-    await client.query("COMMIT");
-
-    res.json({
-      message: "✅ Demodaten eingefügt",
-      fahrerId,
-      fahrzeugId,
-      tourId
-    });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("❌ Fehler beim Seed:", err);
-    res.status(500).json({ error: "Fehler beim Einfügen der Demodaten", details: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-// Neue Tour anlegen
-app.post("/touren", async (req, res) => {
-  const { datum, fahrer_id, fahrzeug_id, startzeit, bemerkung } = req.body;
-  try {
-    const result = await pool.query(
-      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING *",
-      [datum, fahrzeug_id, fahrer_id, startzeit, bemerkung]
-    );
-    res.json({ message: "✅ Tour angelegt", tour: result.rows[0] });
-  } catch (err) {
-    console.error("❌ Fehler beim Anlegen der Tour:", err);
-    res.status(500).json({ error: "Fehler beim Anlegen der Tour", details: err.message });
-  }
-});
-
-// Neuen Stopp anlegen
-app.post("/stopps", async (req, res) => {
-  const { tour_id, adresse, lat, lng, reihenfolge, qr_code } = req.body;
-  try {
-    const result = await pool.query(
-      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-      [tour_id, adresse, lat, lng, reihenfolge, qr_code]
-    );
-    res.json({ message: "✅ Stopp angelegt", stopp: result.rows[0] });
-  } catch (err) {
-    console.error("❌ Fehler beim Anlegen des Stopps:", err);
-    res.status(500).json({ error: "Fehler beim Anlegen des Stopps", details: err.message });
-  }
-});
-
-// ========================= NEU: Fahrer und Fahrzeuge ========================= //
-
-// Fahrer nach ID abrufen
-app.get("/fahrer/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await pool.query("SELECT * FROM fahrer WHERE id = $1", [id]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Fahrer nicht gefunden" });
-    }
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("❌ Fehler bei /fahrer/:id:", err);
-    res.status(500).json({ error: "Fehler beim Abrufen des Fahrers" });
-  }
-});
-
-// Fahrzeug nach ID abrufen
-app.get("/fahrzeuge/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await pool.query("SELECT * FROM fahrzeuge WHERE id = $1", [id]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Fahrzeug nicht gefunden" });
-    }
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("❌ Fehler bei /fahrzeuge/:id:", err);
-    res.status(500).json({ error: "Fehler beim Abrufen des Fahrzeugs" });
-  }
-});
-
-// ========================= Übersicht ========================= //
+// ALLE Daten ausgeben (Debug)
 app.get("/all", async (req, res) => {
   try {
     const fahrer = await pool.query("SELECT * FROM fahrer");
@@ -236,12 +151,96 @@ app.get("/all", async (req, res) => {
       stopps: stopps.rows
     });
   } catch (err) {
-    console.error("❌ Fehler bei /all:", err);
     res.status(500).json({ error: "Fehler beim Abrufen aller Daten" });
   }
 });
 
-// ========================= Root ========================= //
+// Reset-Endpunkt (alle Daten löschen)
+app.get("/reset", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Reihenfolge beachten (wegen Fremdschlüsseln)
+    await client.query("DELETE FROM dokumentation");
+    await client.query("DELETE FROM stopps");
+    await client.query("DELETE FROM touren");
+    await client.query("DELETE FROM fahrzeuge");
+    await client.query("DELETE FROM fahrer");
+
+    await client.query("COMMIT");
+    res.json({ message: "🗑️ Alle Daten wurden erfolgreich gelöscht" });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("❌ Fehler beim Reset:", err);
+    res.status(500).json({ error: "Fehler beim Zurücksetzen der Daten", details: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Seed-Endpunkt (echte Fahrer einfügen + Demo-Tour)
+app.get("/seed", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Fahrer einfügen
+    const fahrerNamen = [
+      "Christoph Arlt",
+      "Hans Noll",
+      "Johannes Backhaus",
+      "Markus Honkomp"
+    ];
+
+    const fahrerIds = [];
+    for (const name of fahrerNamen) {
+      const result = await client.query(
+        "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
+        [name]
+      );
+      fahrerIds.push(result.rows[0].id);
+    }
+
+    // Beispiel-Fahrzeug
+    const fahrzeugResult = await client.query(
+      "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
+      ["Sprinter", "CLP-HG 123"]
+    );
+    const fahrzeugId = fahrzeugResult.rows[0].id;
+
+    // Beispiel-Tour für Christoph Arlt (id = fahrerIds[0])
+    const heute = new Date().toISOString().slice(0, 10);
+    const tourResult = await client.query(
+      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [heute, fahrzeugId, fahrerIds[0], "08:00", "Kundentour"]
+    );
+    const tourId = tourResult.rows[0].id;
+
+    // Beispiel-Stopp
+    await client.query(
+      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
+      [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({ 
+      message: "✅ Fahrer & Demodaten eingefügt", 
+      fahrerIds, 
+      fahrzeugId, 
+      tourId 
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("❌ Fehler beim Seed:", err);
+    res.status(500).json({ error: "Fehler beim Seed", details: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Root-Seite
 app.get("/", (req, res) => {
   res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
 });
