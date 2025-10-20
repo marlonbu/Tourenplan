@@ -19,7 +19,7 @@ async function initDb() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL
+        name TEXT NOT NULL UNIQUE
       );
 
       CREATE TABLE IF NOT EXISTS fahrzeuge (
@@ -161,12 +161,11 @@ app.get("/reset", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Reihenfolge beachten (wegen Fremdschlüsseln)
-    await client.query("DELETE FROM dokumentation");
-    await client.query("DELETE FROM stopps");
-    await client.query("DELETE FROM touren");
-    await client.query("DELETE FROM fahrzeuge");
-    await client.query("DELETE FROM fahrer");
+    await client.query("TRUNCATE dokumentation RESTART IDENTITY CASCADE");
+    await client.query("TRUNCATE stopps RESTART IDENTITY CASCADE");
+    await client.query("TRUNCATE touren RESTART IDENTITY CASCADE");
+    await client.query("TRUNCATE fahrzeuge RESTART IDENTITY CASCADE");
+    await client.query("TRUNCATE fahrer RESTART IDENTITY CASCADE");
 
     await client.query("COMMIT");
     res.json({ message: "🗑️ Alle Daten wurden erfolgreich gelöscht" });
@@ -185,7 +184,7 @@ app.get("/seed", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Fahrer einfügen
+    // Fahrer einfügen (nur wenn noch nicht vorhanden)
     const fahrerNamen = [
       "Christoph Arlt",
       "Hans Noll",
@@ -196,20 +195,20 @@ app.get("/seed", async (req, res) => {
     const fahrerIds = [];
     for (const name of fahrerNamen) {
       const result = await client.query(
-        "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
+        "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
         [name]
       );
       fahrerIds.push(result.rows[0].id);
     }
 
-    // Beispiel-Fahrzeug
+    // Fahrzeug (nur wenn noch nicht vorhanden)
     const fahrzeugResult = await client.query(
       "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
       ["Sprinter", "CLP-HG 123"]
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
-    // Beispiel-Tour für Christoph Arlt (id = fahrerIds[0])
+    // Tour nur für heute einmalig anlegen
     const heute = new Date().toISOString().slice(0, 10);
     const tourResult = await client.query(
       "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
