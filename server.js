@@ -72,7 +72,6 @@ app.get("/fahrer", async (req, res) => {
     const result = await pool.query("SELECT id, name FROM fahrer ORDER BY id");
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
@@ -80,26 +79,21 @@ app.get("/fahrer", async (req, res) => {
 // Fahrer hinzufügen
 app.post("/fahrer/add", async (req, res) => {
   const { name } = req.body;
-
   if (!name || name.trim() === "") {
     return res.status(400).json({ error: "Fahrername ist erforderlich" });
   }
 
   try {
-    // Prüfen, ob Fahrer schon existiert
     const check = await pool.query("SELECT id FROM fahrer WHERE name = $1", [name.trim()]);
     if (check.rows.length > 0) {
       return res.json({ message: "⚠️ Fahrer existiert bereits", name });
     }
-
     const result = await pool.query(
       "INSERT INTO fahrer (name) VALUES ($1) RETURNING id, name",
       [name.trim()]
     );
-
     res.json({ message: "✅ Fahrer hinzugefügt", fahrer: result.rows[0] });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
   }
 });
@@ -110,7 +104,6 @@ app.get("/fahrzeuge", async (req, res) => {
     const result = await pool.query("SELECT id, typ, kennzeichen FROM fahrzeuge ORDER BY id");
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Fahrzeuge" });
   }
 });
@@ -129,24 +122,22 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Touren" });
   }
 });
 
-// QR-Code Check-in (Stopp erledigen)
+// QR-Code Check-in
 app.post("/scan", async (req, res) => {
   const { stopp_id } = req.body;
   try {
     await pool.query("UPDATE stopps SET erledigt = true WHERE id = $1", [stopp_id]);
     res.json({ message: "Stopp bestätigt" });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim QR-Scan" });
   }
 });
 
-// Datei-Upload (Dummy-Version)
+// Datei-Upload (Dummy)
 const upload = multer({ dest: "uploads/" });
 app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
   const stopp_id = req.params.stopp_id;
@@ -158,12 +149,11 @@ app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
     );
     res.json({ message: "Foto gespeichert", url });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fehler beim Foto-Upload" });
   }
 });
 
-// ALLE Daten ausgeben (Debug)
+// Alle Daten (Debug)
 app.get("/all", async (req, res) => {
   try {
     const fahrer = await pool.query("SELECT * FROM fahrer");
@@ -171,107 +161,92 @@ app.get("/all", async (req, res) => {
     const touren = await pool.query("SELECT * FROM touren");
     const stopps = await pool.query("SELECT * FROM stopps");
 
-    res.json({
-      fahrer: fahrer.rows,
-      fahrzeuge: fahrzeuge.rows,
-      touren: touren.rows,
-      stopps: stopps.rows
-    });
+    res.json({ fahrer: fahrer.rows, fahrzeuge: fahrzeuge.rows, touren: touren.rows, stopps: stopps.rows });
   } catch (err) {
     res.status(500).json({ error: "Fehler beim Abrufen aller Daten" });
   }
 });
 
-// Reset-Endpunkt (alle Daten löschen)
+// Reset
 app.get("/reset", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-
     await client.query("TRUNCATE dokumentation RESTART IDENTITY CASCADE");
     await client.query("TRUNCATE stopps RESTART IDENTITY CASCADE");
     await client.query("TRUNCATE touren RESTART IDENTITY CASCADE");
     await client.query("TRUNCATE fahrzeuge RESTART IDENTITY CASCADE");
     await client.query("TRUNCATE fahrer RESTART IDENTITY CASCADE");
-
     await client.query("COMMIT");
-    res.json({ message: "🗑️ Alle Daten wurden erfolgreich gelöscht" });
+    res.json({ message: "🗑️ Alle Daten wurden gelöscht" });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ Fehler beim Reset:", err);
-    res.status(500).json({ error: "Fehler beim Zurücksetzen der Daten", details: err.message });
+    res.status(500).json({ error: "Fehler beim Reset" });
   } finally {
     client.release();
   }
 });
 
-// Seed-Endpunkt (Fahrer ohne Duplikate einfügen + Demo-Tour)
-app.get("/seed", async (req, res) => {
+// Seed-Demo für morgen
+app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    const fahrerNamen = [
-      "Christoph Arlt",
-      "Hans Noll",
-      "Johannes Backhaus",
-      "Markus Honkomp"
-    ];
-
-    const fahrerIds = [];
-    for (const name of fahrerNamen) {
-      const check = await client.query(
-        "SELECT id FROM fahrer WHERE name = $1",
-        [name]
-      );
-
-      if (check.rows.length === 0) {
-        const insert = await client.query(
-          "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
-          [name]
-        );
-        fahrerIds.push(insert.rows[0].id);
-      } else {
-        fahrerIds.push(check.rows[0].id);
-      }
+    // Fahrer finden
+    const fahrerResult = await client.query("SELECT id FROM fahrer WHERE name = $1", ["Christoph Arlt"]);
+    if (fahrerResult.rows.length === 0) {
+      throw new Error("Fahrer Christoph Arlt nicht gefunden. Bitte zuerst /seed ausführen.");
     }
+    const fahrerId = fahrerResult.rows[0].id;
 
+    // Fahrzeug
     const fahrzeugResult = await client.query(
       "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
-      ["Sprinter", "CLP-HG 123"]
+      ["Sprinter", "CLP-HG 456"]
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
-    const heute = new Date().toISOString().slice(0, 10);
+    // Datum morgen
+    const morgen = new Date();
+    morgen.setDate(morgen.getDate() + 1);
+    const datum = morgen.toISOString().slice(0, 10);
+
+    // Tour
     const tourResult = await client.query(
       "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-      [heute, fahrzeugId, fahrerIds[0], "08:00", "Kundentour"]
+      [datum, fahrzeugId, fahrerId, "09:00", "Demo-Tour Lindern → Oldenburg"]
     );
     const tourId = tourResult.rows[0].id;
 
-    await client.query(
-      "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
-      [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
-    );
+    // Stopps
+    const stopps = [
+      { adresse: "Bahnhofstraße 10, 49699 Lindern", lat: 52.836, lng: 7.767, qr: "STOPP-001" },
+      { adresse: "Cloppenburger Straße 55, 49661 Cloppenburg", lat: 52.847, lng: 8.045, qr: "STOPP-002" },
+      { adresse: "Bremer Straße 120, 26135 Oldenburg", lat: 53.128, lng: 8.225, qr: "STOPP-003" },
+      { adresse: "Schloßplatz 1, 26122 Oldenburg", lat: 53.143, lng: 8.213, qr: "STOPP-004" }
+    ];
+
+    for (let i = 0; i < stopps.length; i++) {
+      const s = stopps[i];
+      await client.query(
+        "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
+        [tourId, s.adresse, s.lat, s.lng, i + 1, s.qr]
+      );
+    }
 
     await client.query("COMMIT");
 
-    res.json({
-      message: "✅ Fahrer & Demodaten eingefügt (ohne Duplikate)",
-      fahrerIds,
-      fahrzeugId,
-      tourId
-    });
+    res.json({ message: `✅ Demo-Tour für Christoph Arlt am ${datum} erstellt`, tourId, fahrzeugId, stopps });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ Fehler beim Seed:", err);
-    res.status(500).json({ error: "Fehler beim Seed", details: err.message });
+    res.status(500).json({ error: "Fehler bei /seed-demo", details: err.message });
   } finally {
     client.release();
   }
 });
 
-// Root-Seite
+// Root
 app.get("/", (req, res) => {
   res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
 });
