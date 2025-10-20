@@ -189,7 +189,39 @@ app.post("/stopps", async (req, res) => {
   }
 });
 
-// ========================= NEU: Übersicht aller Daten ========================= //
+// ========================= NEU: Fahrer und Fahrzeuge ========================= //
+
+// Fahrer nach ID abrufen
+app.get("/fahrer/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query("SELECT * FROM fahrer WHERE id = $1", [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Fahrer nicht gefunden" });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ Fehler bei /fahrer/:id:", err);
+    res.status(500).json({ error: "Fehler beim Abrufen des Fahrers" });
+  }
+});
+
+// Fahrzeug nach ID abrufen
+app.get("/fahrzeuge/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query("SELECT * FROM fahrzeuge WHERE id = $1", [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Fahrzeug nicht gefunden" });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ Fehler bei /fahrzeuge/:id:", err);
+    res.status(500).json({ error: "Fehler beim Abrufen des Fahrzeugs" });
+  }
+});
+
+// ========================= Übersicht ========================= //
 app.get("/all", async (req, res) => {
   try {
     const fahrer = await pool.query("SELECT * FROM fahrer");
