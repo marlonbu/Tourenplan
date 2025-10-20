@@ -45,7 +45,11 @@ async function initDb() {
         lng DOUBLE PRECISION,
         reihenfolge INT,
         erledigt BOOLEAN DEFAULT false,
-        qr_code TEXT
+        qr_code TEXT,
+        ankunftszeit TIME,
+        kunde TEXT,
+        kommission TEXT,
+        anmerkung TEXT
       );
 
       CREATE TABLE IF NOT EXISTS dokumentation (
@@ -82,7 +86,6 @@ app.post("/fahrer/add", async (req, res) => {
   if (!name || name.trim() === "") {
     return res.status(400).json({ error: "Fahrername ist erforderlich" });
   }
-
   try {
     const check = await pool.query("SELECT id FROM fahrer WHERE name = $1", [name.trim()]);
     if (check.rows.length > 0) {
@@ -113,7 +116,8 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
     const result = await pool.query(
-      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge, s.lat, s.lng, s.erledigt
+      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge, s.lat, s.lng, 
+              s.erledigt, s.ankunftszeit, s.kunde, s.kommission, s.anmerkung
        FROM touren t
        JOIN stopps s ON s.tour_id = t.id
        WHERE t.fahrer_id = $1 AND t.datum = $2
@@ -203,7 +207,7 @@ app.get("/seed-demo", async (req, res) => {
     // Fahrzeug
     const fahrzeugResult = await client.query(
       "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
-      ["Sprinter", "CLP-HG 456"]
+      ["Sprinter", "CLP-HG 789"]
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
@@ -219,19 +223,24 @@ app.get("/seed-demo", async (req, res) => {
     );
     const tourId = tourResult.rows[0].id;
 
-    // Stopps
+    // Stopps mit Zusatzinfos
     const stopps = [
-      { adresse: "Bahnhofstraße 10, 49699 Lindern", lat: 52.836, lng: 7.767, qr: "STOPP-001" },
-      { adresse: "Cloppenburger Straße 55, 49661 Cloppenburg", lat: 52.847, lng: 8.045, qr: "STOPP-002" },
-      { adresse: "Bremer Straße 120, 26135 Oldenburg", lat: 53.128, lng: 8.225, qr: "STOPP-003" },
-      { adresse: "Schloßplatz 1, 26122 Oldenburg", lat: 53.143, lng: 8.213, qr: "STOPP-004" }
+      { adresse: "Bahnhofstraße 10, 49699 Lindern", lat: 52.836, lng: 7.767, qr: "STOPP-001",
+        ankunftszeit: "09:15", kunde: "Bäckerei Müller", kommission: "K-1001", anmerkung: "Lieferung Brot & Brötchen" },
+      { adresse: "Cloppenburger Straße 55, 49661 Cloppenburg", lat: 52.847, lng: 8.045, qr: "STOPP-002",
+        ankunftszeit: "10:00", kunde: "Supermarkt Edeka", kommission: "K-1002", anmerkung: "Palette Obst" },
+      { adresse: "Bremer Straße 120, 26135 Oldenburg", lat: 53.128, lng: 8.225, qr: "STOPP-003",
+        ankunftszeit: "11:15", kunde: "Restaurant Italia", kommission: "K-1003", anmerkung: "Kühlware" },
+      { adresse: "Schloßplatz 1, 26122 Oldenburg", lat: 53.143, lng: 8.213, qr: "STOPP-004",
+        ankunftszeit: "12:00", kunde: "Modehaus Schneider", kommission: "K-1004", anmerkung: "Kartons Textilien" }
     ];
 
     for (let i = 0; i < stopps.length; i++) {
       const s = stopps[i];
       await client.query(
-        "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
-        [tourId, s.adresse, s.lat, s.lng, i + 1, s.qr]
+        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code, ankunftszeit, kunde, kommission, anmerkung)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [tourId, s.adresse, s.lat, s.lng, i + 1, s.qr, s.ankunftszeit, s.kunde, s.kommission, s.anmerkung]
       );
     }
 
