@@ -19,7 +19,7 @@ async function initDb() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
+        name TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS fahrzeuge (
@@ -74,6 +74,33 @@ app.get("/fahrer", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
+  }
+});
+
+// Fahrer hinzufügen
+app.post("/fahrer/add", async (req, res) => {
+  const { name } = req.body;
+
+  if (!name || name.trim() === "") {
+    return res.status(400).json({ error: "Fahrername ist erforderlich" });
+  }
+
+  try {
+    // Prüfen, ob Fahrer schon existiert
+    const check = await pool.query("SELECT id FROM fahrer WHERE name = $1", [name.trim()]);
+    if (check.rows.length > 0) {
+      return res.json({ message: "⚠️ Fahrer existiert bereits", name });
+    }
+
+    const result = await pool.query(
+      "INSERT INTO fahrer (name) VALUES ($1) RETURNING id, name",
+      [name.trim()]
+    );
+
+    res.json({ message: "✅ Fahrer hinzugefügt", fahrer: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
   }
 });
 
@@ -178,13 +205,12 @@ app.get("/reset", async (req, res) => {
   }
 });
 
-// Seed-Endpunkt (echte Fahrer einfügen + Demo-Tour)
+// Seed-Endpunkt (Fahrer ohne Duplikate einfügen + Demo-Tour)
 app.get("/seed", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer einfügen (nur wenn noch nicht vorhanden)
     const fahrerNamen = [
       "Christoph Arlt",
       "Hans Noll",
@@ -194,21 +220,28 @@ app.get("/seed", async (req, res) => {
 
     const fahrerIds = [];
     for (const name of fahrerNamen) {
-      const result = await client.query(
-        "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+      const check = await client.query(
+        "SELECT id FROM fahrer WHERE name = $1",
         [name]
       );
-      fahrerIds.push(result.rows[0].id);
+
+      if (check.rows.length === 0) {
+        const insert = await client.query(
+          "INSERT INTO fahrer (name) VALUES ($1) RETURNING id",
+          [name]
+        );
+        fahrerIds.push(insert.rows[0].id);
+      } else {
+        fahrerIds.push(check.rows[0].id);
+      }
     }
 
-    // Fahrzeug (nur wenn noch nicht vorhanden)
     const fahrzeugResult = await client.query(
       "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
       ["Sprinter", "CLP-HG 123"]
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
-    // Tour nur für heute einmalig anlegen
     const heute = new Date().toISOString().slice(0, 10);
     const tourResult = await client.query(
       "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -216,7 +249,6 @@ app.get("/seed", async (req, res) => {
     );
     const tourId = tourResult.rows[0].id;
 
-    // Beispiel-Stopp
     await client.query(
       "INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code) VALUES ($1, $2, $3, $4, $5, $6)",
       [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123"]
@@ -224,11 +256,11 @@ app.get("/seed", async (req, res) => {
 
     await client.query("COMMIT");
 
-    res.json({ 
-      message: "✅ Fahrer & Demodaten eingefügt", 
-      fahrerIds, 
-      fahrzeugId, 
-      tourId 
+    res.json({
+      message: "✅ Fahrer & Demodaten eingefügt (ohne Duplikate)",
+      fahrerIds,
+      fahrzeugId,
+      tourId
     });
   } catch (err) {
     await client.query("ROLLBACK");
