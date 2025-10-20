@@ -19,7 +19,7 @@ async function initDb() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL
+        name TEXT NOT NULL UNIQUE
       );
 
       CREATE TABLE IF NOT EXISTS fahrzeuge (
@@ -66,58 +66,15 @@ async function initDb() {
   }
 }
 
-/* ===========================
-   📌 API ENDPOINTS
-=========================== */
+// --------------------- API ROUTES ---------------------
 
-// Fahrer-Liste
-app.get("/fahrer", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT id, name FROM fahrer ORDER BY id");
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
-  }
-});
-
-// Fahrer hinzufügen
-app.post("/fahrer/add", async (req, res) => {
-  const { name } = req.body;
-  if (!name || name.trim() === "") {
-    return res.status(400).json({ error: "Fahrername ist erforderlich" });
-  }
-  try {
-    const check = await pool.query("SELECT id FROM fahrer WHERE name = $1", [name.trim()]);
-    if (check.rows.length > 0) {
-      return res.json({ message: "⚠️ Fahrer existiert bereits", name });
-    }
-    const result = await pool.query(
-      "INSERT INTO fahrer (name) VALUES ($1) RETURNING id, name",
-      [name.trim()]
-    );
-    res.json({ message: "✅ Fahrer hinzugefügt", fahrer: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
-  }
-});
-
-// Fahrzeuge-Liste
-app.get("/fahrzeuge", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT id, typ, kennzeichen FROM fahrzeuge ORDER BY id");
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Laden der Fahrzeuge" });
-  }
-});
-
-// Touren eines Fahrers für bestimmtes Datum
+// Touren für Fahrer abrufen
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
     const result = await pool.query(
-      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge, s.lat, s.lng, 
-              s.erledigt, s.ankunftszeit, s.kunde, s.kommission, s.anmerkung
+      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge, 
+              s.lat, s.lng, s.erledigt, s.ankunftszeit, s.kunde, s.kommission, s.anmerkung
        FROM touren t
        JOIN stopps s ON s.tour_id = t.id
        WHERE t.fahrer_id = $1 AND t.datum = $2
@@ -126,6 +83,7 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Touren" });
   }
 });
@@ -137,6 +95,7 @@ app.post("/scan", async (req, res) => {
     await pool.query("UPDATE stopps SET erledigt = true WHERE id = $1", [stopp_id]);
     res.json({ message: "Stopp bestätigt" });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim QR-Scan" });
   }
 });
@@ -153,55 +112,43 @@ app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
     );
     res.json({ message: "Foto gespeichert", url });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Foto-Upload" });
   }
 });
 
-// Alle Daten (Debug)
-app.get("/all", async (req, res) => {
+// Fahrer-Übersicht
+app.get("/fahrer", async (req, res) => {
   try {
-    const fahrer = await pool.query("SELECT * FROM fahrer");
-    const fahrzeuge = await pool.query("SELECT * FROM fahrzeuge");
-    const touren = await pool.query("SELECT * FROM touren");
-    const stopps = await pool.query("SELECT * FROM stopps");
-
-    res.json({ fahrer: fahrer.rows, fahrzeuge: fahrzeuge.rows, touren: touren.rows, stopps: stopps.rows });
+    const result = await pool.query("SELECT * FROM fahrer ORDER BY name");
+    res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: "Fehler beim Abrufen aller Daten" });
+    res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
 
-// Reset
+// Reset Datenbank (Tabellen leeren)
 app.get("/reset", async (req, res) => {
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await client.query("TRUNCATE dokumentation RESTART IDENTITY CASCADE");
-    await client.query("TRUNCATE stopps RESTART IDENTITY CASCADE");
-    await client.query("TRUNCATE touren RESTART IDENTITY CASCADE");
-    await client.query("TRUNCATE fahrzeuge RESTART IDENTITY CASCADE");
-    await client.query("TRUNCATE fahrer RESTART IDENTITY CASCADE");
-    await client.query("COMMIT");
-    res.json({ message: "🗑️ Alle Daten wurden gelöscht" });
+    await pool.query("TRUNCATE dokumentation, stopps, touren, fahrzeuge, fahrer RESTART IDENTITY CASCADE");
+    res.json({ message: "✅ Alle Tabellen geleert" });
   } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: "Fehler beim Reset" });
-  } finally {
-    client.release();
+    console.error("❌ Fehler beim Reset:", err);
+    res.status(500).json({ error: "Fehler beim Reset", details: err.message });
   }
 });
 
-// Seed-Demo für morgen
+// Seed-Demo mit Zufallsdaten
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer finden
-    const fahrerResult = await client.query("SELECT id FROM fahrer WHERE name = $1", ["Christoph Arlt"]);
-    if (fahrerResult.rows.length === 0) {
-      throw new Error("Fahrer Christoph Arlt nicht gefunden. Bitte zuerst /seed ausführen.");
-    }
+    // Fahrer Christoph Arlt sicherstellen
+    const fahrerResult = await client.query(
+      "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+      ["Christoph Arlt"]
+    );
     const fahrerId = fahrerResult.rows[0].id;
 
     // Fahrzeug
@@ -211,28 +158,59 @@ app.get("/seed-demo", async (req, res) => {
     );
     const fahrzeugId = fahrzeugResult.rows[0].id;
 
-    // Datum morgen
+    // Tour für morgen
     const morgen = new Date();
     morgen.setDate(morgen.getDate() + 1);
     const datum = morgen.toISOString().slice(0, 10);
 
-    // Tour
     const tourResult = await client.query(
-      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1,$2,$3,$4,$5) RETURNING id",
       [datum, fahrzeugId, fahrerId, "09:00", "Demo-Tour Lindern → Oldenburg"]
     );
     const tourId = tourResult.rows[0].id;
 
-    // Stopps mit Zusatzinfos
+    // Stopps mit Zufallsdaten
     const stopps = [
-      { adresse: "Bahnhofstraße 10, 49699 Lindern", lat: 52.836, lng: 7.767, qr: "STOPP-001",
-        ankunftszeit: "09:15", kunde: "Bäckerei Müller", kommission: "K-1001", anmerkung: "Lieferung Brot & Brötchen" },
-      { adresse: "Cloppenburger Straße 55, 49661 Cloppenburg", lat: 52.847, lng: 8.045, qr: "STOPP-002",
-        ankunftszeit: "10:00", kunde: "Supermarkt Edeka", kommission: "K-1002", anmerkung: "Palette Obst" },
-      { adresse: "Bremer Straße 120, 26135 Oldenburg", lat: 53.128, lng: 8.225, qr: "STOPP-003",
-        ankunftszeit: "11:15", kunde: "Restaurant Italia", kommission: "K-1003", anmerkung: "Kühlware" },
-      { adresse: "Schloßplatz 1, 26122 Oldenburg", lat: 53.143, lng: 8.213, qr: "STOPP-004",
-        ankunftszeit: "12:00", kunde: "Modehaus Schneider", kommission: "K-1004", anmerkung: "Kartons Textilien" }
+      {
+        adresse: "Bahnhofstraße 10, 49699 Lindern",
+        lat: 52.836,
+        lng: 7.767,
+        qr: "STOPP-001",
+        ankunftszeit: "09:15",
+        kunde: "Bäckerei Müller",
+        kommission: "K-1001",
+        anmerkung: "Lieferung Brot & Brötchen"
+      },
+      {
+        adresse: "Cloppenburger Straße 55, 49661 Cloppenburg",
+        lat: 52.847,
+        lng: 8.045,
+        qr: "STOPP-002",
+        ankunftszeit: "10:00",
+        kunde: "Supermarkt Edeka",
+        kommission: "K-1002",
+        anmerkung: "Palette Obst"
+      },
+      {
+        adresse: "Bremer Straße 120, 26135 Oldenburg",
+        lat: 53.128,
+        lng: 8.225,
+        qr: "STOPP-003",
+        ankunftszeit: "11:15",
+        kunde: "Restaurant Italia",
+        kommission: "K-1003",
+        anmerkung: "Kühlware"
+      },
+      {
+        adresse: "Schloßplatz 1, 26122 Oldenburg",
+        lat: 53.143,
+        lng: 8.213,
+        qr: "STOPP-004",
+        ankunftszeit: "12:00",
+        kunde: "Modehaus Schneider",
+        kommission: "K-1004",
+        anmerkung: "Kartons Textilien"
+      }
     ];
 
     for (let i = 0; i < stopps.length; i++) {
@@ -246,16 +224,22 @@ app.get("/seed-demo", async (req, res) => {
 
     await client.query("COMMIT");
 
-    res.json({ message: `✅ Demo-Tour für Christoph Arlt am ${datum} erstellt`, tourId, fahrzeugId, stopps });
+    res.json({
+      message: `✅ Demo-Tour für Christoph Arlt am ${datum} erstellt`,
+      tourId,
+      fahrzeugId,
+      stopps
+    });
   } catch (err) {
     await client.query("ROLLBACK");
+    console.error("❌ Fehler bei /seed-demo:", err);
     res.status(500).json({ error: "Fehler bei /seed-demo", details: err.message });
   } finally {
     client.release();
   }
 });
 
-// Root
+// Startseite
 app.get("/", (req, res) => {
   res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
 });
