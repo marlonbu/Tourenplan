@@ -1,25 +1,24 @@
 const express = require("express");
 const { Pool } = require("pg");
-const multer = require("multer");
 const cors = require("cors");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL-Verbindung
+// PostgreSQL Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Tabellen automatisch erstellen
+// Tabellen erstellen
 async function initDb() {
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
+        name TEXT UNIQUE NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS fahrzeuge (
@@ -47,24 +46,6 @@ async function initDb() {
         erledigt BOOLEAN DEFAULT false,
         qr_code TEXT
       );
-
-      CREATE TABLE IF NOT EXISTS dokumentation (
-        id SERIAL PRIMARY KEY,
-        stopp_id INT REFERENCES stopps(id),
-        foto_url TEXT,
-        kommentar TEXT,
-        erstellt_am TIMESTAMP DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS stoppdetails (
-        id SERIAL PRIMARY KEY,
-        stopp_id INT REFERENCES stopps(id),
-        ankunftszeit TIME,
-        kunde TEXT,
-        kommission TEXT,
-        kundenadresse TEXT,
-        anmerkung TEXT
-      );
     `);
     console.log("✅ Tabellen erfolgreich geprüft/erstellt");
   } catch (err) {
@@ -72,49 +53,18 @@ async function initDb() {
   }
 }
 
-// ------------------------------------------
-// Routen
-// ------------------------------------------
-
-// Alle Daten ausgeben
-app.get("/all", async (req, res) => {
-  try {
-    const fahrer = await pool.query("SELECT * FROM fahrer");
-    const fahrzeuge = await pool.query("SELECT * FROM fahrzeuge");
-    const touren = await pool.query("SELECT * FROM touren");
-    const stopps = await pool.query("SELECT * FROM stopps");
-    res.json({
-      fahrer: fahrer.rows,
-      fahrzeuge: fahrzeuge.rows,
-      touren: touren.rows,
-      stopps: stopps.rows
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Fehler bei /all", details: err.message });
-  }
-});
-
-// Alle Fahrer abrufen
+// Fahrer abrufen
 app.get("/fahrer", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM fahrer ORDER BY id ASC");
+    const result = await pool.query("SELECT id, name FROM fahrer ORDER BY id");
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
 
-// Alle Fahrzeuge abrufen
-app.get("/fahrzeuge", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM fahrzeuge ORDER BY id ASC");
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Laden der Fahrzeuge" });
-  }
-});
-
-// Touren für Fahrer abrufen
+// Tourdaten für Fahrer+Datum abrufen
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
@@ -128,14 +78,14 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Laden der Touren" });
   }
 });
 
-// Google Maps Link für Tour generieren
+// Google Maps Link generieren
 app.get("/touren/:fahrer_id/:datum/mapslink", async (req, res) => {
   const { fahrer_id, datum } = req.params;
-
   try {
     const result = await pool.query(
       `SELECT s.adresse
@@ -161,106 +111,76 @@ app.get("/touren/:fahrer_id/:datum/mapslink", async (req, res) => {
     const mapsLink = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&waypoints=${waypoints}`;
     res.json({ mapsLink });
   } catch (err) {
-    console.error("❌ Fehler beim Generieren des Maps-Links:", err);
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Erstellen des Maps-Links" });
   }
 });
 
-// QR-Code Check-in
-app.post("/scan", async (req, res) => {
-  const { stopp_id } = req.body;
-  try {
-    await pool.query("UPDATE stopps SET erledigt = true WHERE id = $1", [stopp_id]);
-    res.json({ message: "Stopp bestätigt" });
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim QR-Scan" });
-  }
-});
-
-// Datei-Upload Dummy
-const upload = multer({ dest: "uploads/" });
-app.post("/upload/:stopp_id", upload.single("foto"), async (req, res) => {
-  const stopp_id = req.params.stopp_id;
-  const url = `/uploads/${req.file.filename}`;
-  try {
-    await pool.query(
-      "INSERT INTO dokumentation (stopp_id, foto_url) VALUES ($1, $2)",
-      [stopp_id, url]
-    );
-    res.json({ message: "Foto gespeichert", url });
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Foto-Upload" });
-  }
-});
-
-// Demo Seed
+// SEED Demo-Daten
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer
-    const fahrerNamen = ["Christoph Arlt", "Hans Noll", "Johannes Backhaus", "Markus Honkomp"];
-    let fahrerIds = [];
-    for (const name of fahrerNamen) {
-      const result = await client.query(
-        "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    // Fahrer einfügen
+    const fahrer = ["Christoph Arlt", "Hans Noll", "Johannes Backhaus", "Markus Honkomp"];
+    const fahrerIds = [];
+    for (let name of fahrer) {
+      const r = await client.query(
+        `INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id`,
         [name]
       );
-      fahrerIds.push(result.rows[0].id);
+      if (r.rows[0]) fahrerIds.push(r.rows[0].id);
+      else {
+        const existing = await client.query(`SELECT id FROM fahrer WHERE name=$1`, [name]);
+        fahrerIds.push(existing.rows[0].id);
+      }
     }
 
     // Fahrzeug
     const fahrzeugResult = await client.query(
-      "INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) RETURNING id",
-      ["Sprinter", "CLP-HG 123"]
+      `INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ('Sprinter', 'CLP-HG 123')
+       ON CONFLICT DO NOTHING RETURNING id`
     );
-    const fahrzeugId = fahrzeugResult.rows[0].id;
+    const fahrzeugId = fahrzeugResult.rows[0]
+      ? fahrzeugResult.rows[0].id
+      : (await client.query(`SELECT id FROM fahrzeuge WHERE kennzeichen='CLP-HG 123'`)).rows[0].id;
 
-    // Tour
-    const datum = new Date().toISOString().slice(0, 10);
+    // Tour für morgen
+    const morgen = new Date();
+    morgen.setDate(morgen.getDate() + 1);
+    const datum = morgen.toISOString().slice(0, 10);
+
     const tourResult = await client.query(
-      "INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung) VALUES ($1,$2,$3,$4,$5) RETURNING id",
-      [datum, fahrzeugId, fahrerIds[0], "08:00", "Demo-Tour"]
+      `INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [datum, fahrzeugId, fahrerIds[0], "08:00", "Demo-Tour für morgen"]
     );
     const tourId = tourResult.rows[0].id;
 
     // Stopps
     const stopps = [
-      "Bahnhofstr. 12, 49699 Lindern",
-      "Industriestr. 8, 49661 Cloppenburg",
-      "Bremer Str. 45, 26135 Oldenburg",
-      "Am Markt 5, 26203 Wardenburg"
+      { adresse: "Bahnhofstraße 12, 49699 Lindern", lat: 52.85, lng: 7.77 },
+      { adresse: "Industriestraße 8, 49661 Cloppenburg", lat: 52.85, lng: 8.05 },
+      { adresse: "Bremer Straße 45, 26135 Oldenburg", lat: 53.13, lng: 8.23 },
+      { adresse: "Am Markt 5, 26203 Wardenburg", lat: 53.05, lng: 8.20 }
     ];
 
-    let counter = 1;
-    for (const adresse of stopps) {
-      const stopp = await client.query(
-        "INSERT INTO stopps (tour_id, adresse, reihenfolge, erledigt, qr_code) VALUES ($1,$2,$3,false,$4) RETURNING id",
-        [tourId, adresse, counter, `STOPP-${counter}`]
-      );
-
+    for (let i = 0; i < stopps.length; i++) {
+      const s = stopps[i];
       await client.query(
-        "INSERT INTO stoppdetails (stopp_id, ankunftszeit, kunde, kommission, kundenadresse, anmerkung) VALUES ($1,$2,$3,$4,$5,$6)",
-        [
-          stopp.rows[0].id,
-          `${8 + counter}:00`,
-          `Kunde ${counter}`,
-          `KOM-${100 + counter}`,
-          adresse,
-          `Anmerkung ${counter}`
-        ]
+        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [tourId, s.adresse, s.lat, s.lng, i + 1, `STOPP-${i + 1}`]
       );
-
-      counter++;
     }
 
     await client.query("COMMIT");
-
-    res.json({ message: "✅ Demo-Tour eingefügt" });
+    res.json({ message: "✅ Demo-Daten eingefügt", fahrerIds, tourId });
   } catch (err) {
     await client.query("ROLLBACK");
-    res.status(500).json({ error: "Fehler bei /seed-demo", details: err.message });
+    console.error("❌ Fehler beim Seed:", err);
+    res.status(500).json({ error: "Fehler beim Seed", details: err.message });
   } finally {
     client.release();
   }
@@ -268,7 +188,7 @@ app.get("/seed-demo", async (req, res) => {
 
 // Startseite
 app.get("/", (req, res) => {
-  res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
+  res.send("🚚 Tourenplan API läuft – Tabellen geprüft ✅");
 });
 
 // Server starten
