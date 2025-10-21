@@ -1,6 +1,7 @@
 {
   "name": "tourenplan-backend",
   "version": "1.0.0",
+  "description": "Backend für Tourenplan",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
