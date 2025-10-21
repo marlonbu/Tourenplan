@@ -1,45 +1,55 @@
 import express from "express";
-import pg from "pg";
+import bodyParser from "body-parser";
+import pkg from "pg";
 import cors from "cors";
 
+const { Pool } = pkg;
 const app = express();
+app.use(bodyParser.json());
 app.use(cors());
-app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-
-const pool = new pg.Pool({
+// PostgreSQL-Verbindung
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// ✅ Tabellen erstellen, wenn nicht vorhanden
-async function initDB() {
+// Tabellen erstellen
+async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
       id SERIAL PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL
+      name TEXT NOT NULL
     );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrzeuge (
       id SERIAL PRIMARY KEY,
-      typ TEXT,
-      kennzeichen TEXT UNIQUE
+      typ TEXT NOT NULL,
+      kennzeichen TEXT NOT NULL
     );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
       datum DATE NOT NULL,
-      fahrzeug_id INT REFERENCES fahrzeuge(id),
-      fahrer_id INT REFERENCES fahrer(id),
+      fahrzeug_id INTEGER REFERENCES fahrzeuge(id),
+      fahrer_id INTEGER REFERENCES fahrer(id),
       startzeit TIME,
       bemerkung TEXT
     );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
-      tour_id INT REFERENCES touren(id) ON DELETE CASCADE,
-      adresse TEXT,
+      tour_id INTEGER REFERENCES touren(id),
+      adresse TEXT NOT NULL,
       lat NUMERIC,
       lng NUMERIC,
-      reihenfolge INT,
+      reihenfolge INTEGER,
       erledigt BOOLEAN DEFAULT false,
       qr_code TEXT,
       ankunftszeit TIME,
@@ -48,125 +58,110 @@ async function initDB() {
       anmerkung TEXT
     );
   `);
+
   console.log("✅ Tabellen erfolgreich geprüft/erstellt");
 }
 
-// ✅ Endpunkt: Reset (löscht & erstellt neu)
-app.get("/reset-db", async (req, res) => {
-  try {
-    await pool.query(`
-      DROP TABLE IF EXISTS stopps CASCADE;
-      DROP TABLE IF EXISTS touren CASCADE;
-      DROP TABLE IF EXISTS fahrzeuge CASCADE;
-      DROP TABLE IF EXISTS fahrer CASCADE;
-    `);
-    await initDB();
-    res.json({ success: true, message: "Tabellen zurückgesetzt & neu erstellt" });
-  } catch (err) {
-    res.status(500).json({ error: "Fehler bei /reset-db", details: err.message });
-  }
-});
-
-// ✅ Endpunkt: Seed mit Demo-Daten
+// Seed Demo-Daten (Variante B: ohne ON CONFLICT)
 app.get("/seed-demo", async (req, res) => {
   try {
+    await initDb();
+
     // Fahrer
     const fahrer = ["Christoph Arlt", "Hans Noll", "Johannes Backhaus", "Markus Honkomp"];
     for (let name of fahrer) {
-      await pool.query(`INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, [name]);
+      await pool.query(`INSERT INTO fahrer (name) VALUES ($1)`, [name]);
     }
 
     // Fahrzeuge
     const fahrzeuge = [
-      { typ: "Sprinter", kennzeichen: "CLP-HG 123" },
-      { typ: "LKW", kennzeichen: "OL-AB 456" }
+      { typ: "Sprinter", kennzeichen: "CLP-AR 123" },
+      { typ: "Sprinter", kennzeichen: "CLP-NO 456" },
+      { typ: "Sprinter", kennzeichen: "CLP-BA 789" },
+      { typ: "Sprinter", kennzeichen: "CLP-HO 321" },
     ];
     for (let f of fahrzeuge) {
-      await pool.query(
-        `INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2) ON CONFLICT (kennzeichen) DO NOTHING`,
-        [f.typ, f.kennzeichen]
-      );
+      await pool.query(`INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2)`, [f.typ, f.kennzeichen]);
     }
 
-    // Hole IDs für Fahrer & Fahrzeug
-    const fahrerRes = await pool.query(`SELECT * FROM fahrer WHERE name = 'Christoph Arlt'`);
-    const fahrzeugRes = await pool.query(`SELECT * FROM fahrzeuge LIMIT 1`);
-    const fahrerId = fahrerRes.rows[0].id;
-    const fahrzeugId = fahrzeugRes.rows[0].id;
+    // Eine Demo-Tour für morgen
+    const morgen = new Date();
+    morgen.setDate(morgen.getDate() + 1);
 
-    // Demo-Tour für morgen
-    const tourRes = await pool.query(
+    const tourResult = await pool.query(
       `INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [new Date(Date.now() + 24 * 60 * 60 * 1000), fahrzeugId, fahrerId, "08:00", "Demo-Tour"]
+       VALUES ($1, 1, 1, '08:00:00', 'Demo-Tour West') RETURNING id`,
+      [morgen.toISOString().slice(0, 10)]
     );
-    const tourId = tourRes.rows[0].id;
 
-    // Stopps mit Zufallsdaten
+    const tourId = tourResult.rows[0].id;
+
+    // Stopps mit Demo-Daten
     const stopps = [
       {
-        adresse: "Lindenstraße 12, 49699 Lindern",
-        lat: 52.85,
-        lng: 7.77,
+        adresse: "Bahnhofstraße 1, 49699 Lindern",
+        lat: 52.843,
+        lng: 7.772,
         reihenfolge: 1,
-        kunde: "Kunde A",
-        kommission: "12345",
-        anmerkung: "Lieferung morgens",
-        ankunftszeit: "09:00"
+        kunde: "Musterkunde A",
+        kommission: "KOM-123",
+        ankunftszeit: "09:00:00",
+        anmerkung: "Anruf vor Anlieferung"
       },
       {
-        adresse: "Bahnhofstraße 5, 49661 Cloppenburg",
-        lat: 52.85,
-        lng: 8.05,
+        adresse: "Alexanderstraße 50, 26121 Oldenburg",
+        lat: 53.143,
+        lng: 8.214,
         reihenfolge: 2,
-        kunde: "Kunde B",
-        kommission: "23456",
-        anmerkung: "Palette",
-        ankunftszeit: "10:00"
+        kunde: "Musterkunde B",
+        kommission: "KOM-456",
+        ankunftszeit: "10:30:00",
+        anmerkung: "Hintereingang nutzen"
       },
       {
-        adresse: "Bremer Heerstraße 200, 26135 Oldenburg",
-        lat: 53.14,
-        lng: 8.23,
+        adresse: "Lindenstraße 12, 49661 Cloppenburg",
+        lat: 52.847,
+        lng: 8.047,
         reihenfolge: 3,
-        kunde: "Kunde C",
-        kommission: "34567",
-        anmerkung: "Express",
-        ankunftszeit: "11:00"
+        kunde: "Musterkunde C",
+        kommission: "KOM-789",
+        ankunftszeit: "12:00:00",
+        anmerkung: "Empfang im 2. Stock"
       },
       {
-        adresse: "Hauptstraße 1, 26122 Oldenburg",
-        lat: 53.14,
-        lng: 8.21,
+        adresse: "Hauptstraße 99, 49681 Garrel",
+        lat: 52.950,
+        lng: 8.034,
         reihenfolge: 4,
-        kunde: "Kunde D",
-        kommission: "45678",
-        anmerkung: "Besonderer Hinweis",
-        ankunftszeit: "12:00"
-      }
+        kunde: "Musterkunde D",
+        kommission: "KOM-321",
+        ankunftszeit: "13:30:00",
+        anmerkung: "Ware direkt abladen"
+      },
     ];
 
     for (let s of stopps) {
       await pool.query(
-        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, anmerkung, ankunftszeit)
+        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, ankunftszeit, anmerkung)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [tourId, s.adresse, s.lat, s.lng, s.reihenfolge, s.kunde, s.kommission, s.anmerkung, s.ankunftszeit]
+        [tourId, s.adresse, s.lat, s.lng, s.reihenfolge, s.kunde, s.kommission, s.ankunftszeit, s.anmerkung]
       );
     }
 
-    res.json({ success: true, message: "Demo-Daten eingetragen" });
+    res.json({ message: "✅ Demo-Tour erfolgreich erstellt!" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Fehler beim Seed", details: err.message });
   }
 });
 
-// ✅ Endpunkte für Frontend
+// Fahrer-Endpunkt
 app.get("/fahrer", async (req, res) => {
   const result = await pool.query("SELECT * FROM fahrer ORDER BY id");
   res.json(result.rows);
 });
 
+// Touren nach Fahrer und Datum
 app.get("/touren/:fahrerId/:datum", async (req, res) => {
   const { fahrerId, datum } = req.params;
   try {
@@ -180,19 +175,15 @@ app.get("/touren/:fahrerId/:datum", async (req, res) => {
   }
 });
 
+// Stopps einer Tour
 app.get("/stopps/:tourId", async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT * FROM stopps WHERE tour_id=$1 ORDER BY reihenfolge`, [
-      req.params.tourId,
-    ]);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
-  }
+  const { tourId } = req.params;
+  const result = await pool.query("SELECT * FROM stopps WHERE tour_id=$1 ORDER BY reihenfolge", [tourId]);
+  res.json(result.rows);
 });
 
-// Start
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 API läuft auf Port ${PORT}`);
-  initDB();
+  console.log(`✅ API läuft auf Port ${PORT}`);
+  initDb();
 });
