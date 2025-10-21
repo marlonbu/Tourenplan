@@ -55,12 +55,12 @@ app.get("/fahrer", async (req, res) => {
   res.json(result.rows);
 });
 
-// Tourdaten inkl. neuer Felder abrufen
+// Touren für Fahrer abrufen
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
     const result = await pool.query(
-      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge, 
+      `SELECT t.id as tour_id, s.id as stopp_id, s.adresse, s.reihenfolge,
               s.lat, s.lng, s.erledigt, s.ankunftszeit, s.kunde, s.kommission, s.anmerkung
        FROM touren t
        JOIN stopps s ON s.tour_id = t.id
@@ -89,13 +89,13 @@ app.post("/scan", async (req, res) => {
   }
 });
 
-// 🚀 Seed-Demo
+// 🚀 Seed-Demo mit mehreren Tagen
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer
+    // Fahrer einfügen (oder finden)
     const fahrerRes = await client.query(
       `INSERT INTO fahrer (name) VALUES ($1)
        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
@@ -104,7 +104,7 @@ app.get("/seed-demo", async (req, res) => {
     );
     const fahrerId = fahrerRes.rows[0].id;
 
-    // Fahrzeug
+    // Fahrzeug einfügen (oder finden)
     const fahrzeugRes = await client.query(
       `INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2)
        ON CONFLICT DO NOTHING RETURNING id`,
@@ -113,93 +113,97 @@ app.get("/seed-demo", async (req, res) => {
     const fahrzeugId =
       fahrzeugRes.rows.length > 0 ? fahrzeugRes.rows[0].id : 1;
 
-    // Datum für morgen
-    const morgen = new Date();
-    morgen.setDate(morgen.getDate() + 1);
-    const datum = morgen.toISOString().slice(0, 10);
+    // ➕ Für heute, morgen, übermorgen
+    const dates = [0, 1, 2].map((offset) => {
+      const d = new Date();
+      d.setDate(d.getDate() + offset);
+      return d.toISOString().slice(0, 10);
+    });
 
-    // Tour
-    const tourRes = await client.query(
-      `INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [datum, fahrzeugId, fahrerId, "08:00", "Demo-Tour mit Extras"]
-    );
-    const tourId = tourRes.rows[0].id;
+    const allTours = [];
 
-    // Stopps mit neuen Feldern
-    const stopps = [
-      {
-        adresse: "Lindern (Oldenburg), Rathaus",
-        lat: 52.845,
-        lng: 7.767,
-        qr: "QR-001",
-        ankunftszeit: "08:30",
-        kunde: "Musterkunde A",
-        kommission: "KOM-1001",
-        anmerkung: "Beim Nachbarn abgeben"
-      },
-      {
-        adresse: "Lastrup, Ortsmitte",
-        lat: 52.783,
-        lng: 7.867,
-        qr: "QR-002",
-        ankunftszeit: "09:00",
-        kunde: "Kunde B",
-        kommission: "KOM-1002",
-        anmerkung: "Barzahlung"
-      },
-      {
-        adresse: "Cloppenburg, Bahnhof",
-        lat: 52.847,
-        lng: 8.042,
-        qr: "QR-003",
-        ankunftszeit: "09:30",
-        kunde: "Kunde C",
-        kommission: "KOM-1003",
-        anmerkung: "Große Lieferung"
-      },
-      {
-        adresse: "Oldenburg, Innenstadt",
-        lat: 53.143,
-        lng: 8.214,
-        qr: "QR-004",
-        ankunftszeit: "10:00",
-        kunde: "Kunde D",
-        kommission: "KOM-1004",
-        anmerkung: "Lieferung ins Büro"
-      }
-    ];
-
-    for (let i = 0; i < stopps.length; i++) {
-      await client.query(
-        `INSERT INTO stopps 
-         (tour_id, adresse, lat, lng, reihenfolge, qr_code, ankunftszeit, kunde, kommission, anmerkung)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          tourId,
-          stopps[i].adresse,
-          stopps[i].lat,
-          stopps[i].lng,
-          i + 1,
-          stopps[i].qr,
-          stopps[i].ankunftszeit,
-          stopps[i].kunde,
-          stopps[i].kommission,
-          stopps[i].anmerkung
-        ]
+    for (const datum of dates) {
+      const tourRes = await client.query(
+        `INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+        [datum, fahrzeugId, fahrerId, "08:00", `Demo-Tour für ${datum}`]
       );
+      const tourId = tourRes.rows[0].id;
+
+      const stopps = [
+        {
+          adresse: "Lindern (Oldenburg), Rathaus",
+          lat: 52.845,
+          lng: 7.767,
+          qr: "QR-001",
+          ankunftszeit: "08:30",
+          kunde: "Musterkunde A",
+          kommission: "KOM-1001",
+          anmerkung: "Beim Nachbarn abgeben"
+        },
+        {
+          adresse: "Lastrup, Ortsmitte",
+          lat: 52.783,
+          lng: 7.867,
+          qr: "QR-002",
+          ankunftszeit: "09:00",
+          kunde: "Kunde B",
+          kommission: "KOM-1002",
+          anmerkung: "Barzahlung"
+        },
+        {
+          adresse: "Cloppenburg, Bahnhof",
+          lat: 52.847,
+          lng: 8.042,
+          qr: "QR-003",
+          ankunftszeit: "09:30",
+          kunde: "Kunde C",
+          kommission: "KOM-1003",
+          anmerkung: "Große Lieferung"
+        },
+        {
+          adresse: "Oldenburg, Innenstadt",
+          lat: 53.143,
+          lng: 8.214,
+          qr: "QR-004",
+          ankunftszeit: "10:00",
+          kunde: "Kunde D",
+          kommission: "KOM-1004",
+          anmerkung: "Lieferung ins Büro"
+        }
+      ];
+
+      for (let i = 0; i < stopps.length; i++) {
+        await client.query(
+          `INSERT INTO stopps 
+           (tour_id, adresse, lat, lng, reihenfolge, qr_code, ankunftszeit, kunde, kommission, anmerkung)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [
+            tourId,
+            stopps[i].adresse,
+            stopps[i].lat,
+            stopps[i].lng,
+            i + 1,
+            stopps[i].qr,
+            stopps[i].ankunftszeit,
+            stopps[i].kunde,
+            stopps[i].kommission,
+            stopps[i].anmerkung
+          ]
+        );
+      }
+
+      allTours.push({ datum, tourId, stopps: stopps.length });
     }
 
     await client.query("COMMIT");
 
     res.json({
-      message: "✅ Demo-Tour erstellt mit Extra-Feldern",
+      message: "✅ Demo-Touren für heute, morgen und übermorgen erstellt",
       fahrerId,
       fahrzeugId,
-      tourId,
-      datum,
-      stopps: stopps.length
+      tours: allTours
     });
   } catch (err) {
     await client.query("ROLLBACK");
