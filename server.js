@@ -12,7 +12,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Tabellen erstellen
+// Tabellen erstellen (mit UNIQUE constraints!)
 async function initDb() {
   try {
     await pool.query(`
@@ -24,7 +24,7 @@ async function initDb() {
       CREATE TABLE IF NOT EXISTS fahrzeuge (
         id SERIAL PRIMARY KEY,
         typ TEXT,
-        kennzeichen TEXT
+        kennzeichen TEXT UNIQUE
       );
 
       CREATE TABLE IF NOT EXISTS touren (
@@ -140,7 +140,7 @@ app.get("/seed-demo", async (req, res) => {
     // Fahrzeug
     const fahrzeugResult = await client.query(
       `INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ('Sprinter', 'CLP-HG 123')
-       ON CONFLICT DO NOTHING RETURNING id`
+       ON CONFLICT (kennzeichen) DO NOTHING RETURNING id`
     );
     const fahrzeugId = fahrzeugResult.rows[0]
       ? fahrzeugResult.rows[0].id
