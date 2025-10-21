@@ -56,7 +56,7 @@ async function initDb() {
       );
     `);
 
-    // 🔑 Neue Spalten ergänzen (idempotent)
+    // 🔑 Neue Spalten ergänzen
     await pool.query(`
       ALTER TABLE stopps
         ADD COLUMN IF NOT EXISTS telefon TEXT,
@@ -81,7 +81,7 @@ app.get("/fahrer", async (req, res) => {
   }
 });
 
-// Touren für Fahrer abrufen
+// Touren für Fahrer (Tagesansicht)
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
@@ -101,6 +101,36 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   }
 });
 
+// Wochenübersicht für einen Fahrer
+app.get("/touren/woche/:fahrer_id/:datum", async (req, res) => {
+  const { fahrer_id, datum } = req.params;
+  try {
+    const start = new Date(datum);
+    const day = start.getDay(); // 0 = Sonntag, 1 = Montag
+    const diffToMonday = day === 0 ? -6 : 1 - day;
+    const monday = new Date(start);
+    monday.setDate(start.getDate() + diffToMonday);
+
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const result = await pool.query(
+      `SELECT t.id as tour_id, t.datum, f.name as fahrer_name, s.adresse, s.reihenfolge
+       FROM touren t
+       JOIN fahrer f ON f.id = t.fahrer_id
+       JOIN stopps s ON s.tour_id = t.id
+       WHERE t.fahrer_id = $1 AND t.datum BETWEEN $2 AND $3
+       ORDER BY t.datum, s.reihenfolge`,
+      [fahrer_id, monday.toISOString().slice(0, 10), sunday.toISOString().slice(0, 10)]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Fehler bei Wochenübersicht:", err);
+    res.status(500).json({ error: "Fehler bei Wochenübersicht" });
+  }
+});
+
 // ✅ Erledigt toggeln
 app.post("/scan", async (req, res) => {
   const { stopp_id } = req.body;
@@ -116,7 +146,7 @@ app.post("/scan", async (req, res) => {
   }
 });
 
-// ✅ Teilupdate eines Stopps (telefon / hinweis / status_text / erledigt(optional))
+// ✅ Teilupdate eines Stopps
 app.patch("/stopps/:id", async (req, res) => {
   const { id } = req.params;
   const { telefon, hinweis, status_text, erledigt } = req.body;
@@ -169,7 +199,7 @@ app.get("/reset", async (req, res) => {
   }
 });
 
-// Seed: Demo-Daten
+// Seed Demo
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -194,20 +224,11 @@ app.get("/seed-demo", async (req, res) => {
     );
     const tourId = tourResult.rows[0].id;
 
-    const stops = [
-      { adr: "Musterstraße 1, 12345 Musterstadt", lat: 52.52, lng: 13.405, tel: "01234 56789", hinw: "Beim Nachbarn klingeln" },
-      { adr: "Beispielallee 10, 26122 Oldenburg", lat: 53.143, lng: 8.214, tel: "0441 987654", hinw: "Bitte vorher anrufen" },
-      { adr: "Marktplatz 3, 49661 Cloppenburg", lat: 52.847, lng: 8.038, tel: "04471 555333", hinw: "" },
-    ];
-
-    for (let i = 0; i < stops.length; i++) {
-      const s = stops[i];
-      await client.query(
-        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code, telefon, hinweis, status_text, erledigt)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [tourId, s.adr, s.lat, s.lng, i + 1, `QR-${100 + i}`, s.tel, s.hinw, "", false]
-      );
-    }
+    await client.query(
+      `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code, telefon, hinweis, status_text, erledigt)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [tourId, "Musterstraße 1, 12345 Musterstadt", 52.52, 13.405, 1, "QR-DEMO-123", "01234 56789", "Beim Nachbarn klingeln", "offen", false]
+    );
 
     await client.query("COMMIT");
     res.json({ message: "✅ Demo-Daten eingefügt" });
