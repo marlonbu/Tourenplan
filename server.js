@@ -6,73 +6,52 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL-Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Tabellen automatisch erstellen
+// Tabellen erstellen
 async function initDb() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS fahrer (
-        id SERIAL PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS fahrzeuge (
-        id SERIAL PRIMARY KEY,
-        typ TEXT,
-        kennzeichen TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS touren (
-        id SERIAL PRIMARY KEY,
-        datum DATE NOT NULL,
-        fahrzeug_id INT REFERENCES fahrzeuge(id),
-        fahrer_id INT REFERENCES fahrer(id),
-        startzeit TIME,
-        bemerkung TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS stopps (
-        id SERIAL PRIMARY KEY,
-        tour_id INT REFERENCES touren(id),
-        adresse TEXT,
-        lat DOUBLE PRECISION,
-        lng DOUBLE PRECISION,
-        reihenfolge INT,
-        erledigt BOOLEAN DEFAULT false,
-        qr_code TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS dokumentation (
-        id SERIAL PRIMARY KEY,
-        stopp_id INT REFERENCES stopps(id),
-        foto_url TEXT,
-        kommentar TEXT,
-        erstellt_am TIMESTAMP DEFAULT now()
-      );
-    `);
-    console.log("✅ Tabellen erfolgreich geprüft/erstellt");
-  } catch (err) {
-    console.error("❌ Fehler beim Initialisieren der Tabellen:", err);
-  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fahrer (
+      id SERIAL PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fahrzeuge (
+      id SERIAL PRIMARY KEY,
+      typ TEXT,
+      kennzeichen TEXT
+    );
+    CREATE TABLE IF NOT EXISTS touren (
+      id SERIAL PRIMARY KEY,
+      datum DATE NOT NULL,
+      fahrzeug_id INT REFERENCES fahrzeuge(id),
+      fahrer_id INT REFERENCES fahrer(id),
+      startzeit TIME,
+      bemerkung TEXT
+    );
+    CREATE TABLE IF NOT EXISTS stopps (
+      id SERIAL PRIMARY KEY,
+      tour_id INT REFERENCES touren(id),
+      adresse TEXT,
+      lat DOUBLE PRECISION,
+      lng DOUBLE PRECISION,
+      reihenfolge INT,
+      erledigt BOOLEAN DEFAULT false,
+      qr_code TEXT
+    );
+  `);
+  console.log("✅ Tabellen erfolgreich geprüft/erstellt");
 }
 
-// Fahrer abrufen
+// Fahrer
 app.get("/fahrer", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM fahrer ORDER BY name");
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
-  }
+  const result = await pool.query("SELECT * FROM fahrer ORDER BY id");
+  res.json(result.rows);
 });
 
-// Touren für Fahrer und Datum abrufen
+// Touren für Fahrer
 app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   const { fahrer_id, datum } = req.params;
   try {
@@ -91,99 +70,107 @@ app.get("/touren/:fahrer_id/:datum", async (req, res) => {
   }
 });
 
-// Stopps pro Tour abrufen
-app.get("/stopps/:tour_id", async (req, res) => {
-  const { tour_id } = req.params;
-  try {
-    const result = await pool.query("SELECT * FROM stopps WHERE tour_id = $1 ORDER BY reihenfolge", [tour_id]);
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
-  }
-});
-
-// ✅ Seed-Endpunkt mit fester Demo-Tour für 22.10.2025
+// 🚀 Seed-Demo mit festen Stopps
 app.get("/seed-demo", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // Fahrer einfügen (nur wenn nicht vorhanden)
-    const fahrerResult = await client.query(
+    // Fahrer einfügen (oder finden)
+    const fahrerRes = await client.query(
       `INSERT INTO fahrer (name) VALUES ($1)
        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
        RETURNING id`,
       ["Christoph Arlt"]
     );
-    const fahrerId = fahrerResult.rows[0].id;
+    const fahrerId = fahrerRes.rows[0].id;
 
-    // Fahrzeug einfügen (nur wenn nicht vorhanden)
-    const fahrzeugResult = await client.query(
+    // Fahrzeug einfügen (oder finden)
+    const fahrzeugRes = await client.query(
       `INSERT INTO fahrzeuge (typ, kennzeichen) VALUES ($1, $2)
-       ON CONFLICT DO NOTHING
-       RETURNING id`,
-      ["Sprinter", "CLP-CA 123"]
+       ON CONFLICT DO NOTHING RETURNING id`,
+      ["Sprinter", "CLP-AR 123"]
     );
     const fahrzeugId =
-      fahrzeugResult.rows.length > 0
-        ? fahrzeugResult.rows[0].id
-        : (await client.query("SELECT id FROM fahrzeuge WHERE kennzeichen=$1", ["CLP-CA 123"])).rows[0].id;
+      fahrzeugRes.rows.length > 0 ? fahrzeugRes.rows[0].id : 1;
 
-    // Tour für den 22.10.2025
-    const tourResult = await client.query(
+    // Datum für morgen
+    const morgen = new Date();
+    morgen.setDate(morgen.getDate() + 1);
+    const datum = morgen.toISOString().slice(0, 10);
+
+    // Tour einfügen
+    const tourRes = await client.query(
       `INSERT INTO touren (datum, fahrzeug_id, fahrer_id, startzeit, bemerkung)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT DO NOTHING
        RETURNING id`,
-      ["2025-10-22", fahrzeugId, fahrerId, "08:00", "Demo-Tour Oldenburg"]
+      [datum, fahrzeugId, fahrerId, "08:00", "Demo-Tour Lindern → Oldenburg"]
     );
+    const tourId = tourRes.rows[0].id;
 
-    let tourId;
-    if (tourResult.rows.length > 0) {
-      tourId = tourResult.rows[0].id;
-    } else {
-      const existing = await client.query(
-        "SELECT id FROM touren WHERE datum=$1 AND fahrer_id=$2",
-        ["2025-10-22", fahrerId]
-      );
-      tourId = existing.rows[0].id;
-    }
-
-    // Stopps (4 Stationen zwischen Lindern und Oldenburg)
+    // Stopps (mit echten Koordinaten)
     const stopps = [
-      { adresse: "Lindern, Hauptstraße 10", lat: 52.835, lng: 7.771 },
-      { adresse: "Lastrup, Kirchplatz 5", lat: 52.783, lng: 7.867 },
-      { adresse: "Cloppenburg, Bahnhofstraße 20", lat: 52.844, lng: 8.045 },
-      { adresse: "Oldenburg, Lange Straße 30", lat: 53.143, lng: 8.214 }
+      {
+        adresse: "Lindern (Oldenburg), Rathaus",
+        lat: 52.845,
+        lng: 7.767,
+        qr: "QR-001"
+      },
+      {
+        adresse: "Lastrup, Ortsmitte",
+        lat: 52.783,
+        lng: 7.867,
+        qr: "QR-002"
+      },
+      {
+        adresse: "Cloppenburg, Bahnhof",
+        lat: 52.847,
+        lng: 8.042,
+        qr: "QR-003"
+      },
+      {
+        adresse: "Oldenburg, Innenstadt",
+        lat: 53.143,
+        lng: 8.214,
+        qr: "QR-004"
+      }
     ];
 
     for (let i = 0; i < stopps.length; i++) {
       await client.query(
         `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, qr_code)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT DO NOTHING`,
-        [tourId, stopps[i].adresse, stopps[i].lat, stopps[i].lng, i + 1, `QR-${i + 1}`]
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [tourId, stopps[i].adresse, stopps[i].lat, stopps[i].lng, i + 1, stopps[i].qr]
       );
     }
 
     await client.query("COMMIT");
-    res.json({ message: "✅ Demo-Tour erfolgreich erstellt", tourId, fahrerId });
+
+    res.json({
+      message: "✅ Demo-Tour erstellt",
+      fahrerId,
+      fahrzeugId,
+      tourId,
+      datum,
+      stopps: stopps.length
+    });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ Fehler beim Seed-Demo:", err);
-    res.status(500).json({ error: "Fehler beim Seed-Demo", details: err.message });
+    console.error("❌ Fehler bei /seed-demo:", err);
+    res.status(500).json({
+      error: "Fehler beim Seed",
+      details: err.message
+    });
   } finally {
     client.release();
   }
 });
 
-// Startseite
+// Root
 app.get("/", (req, res) => {
-  res.send("🚚 Tourenplan API läuft – Tabellen wurden geprüft/erstellt ✅");
+  res.send("🚚 Tourenplan API läuft ✅");
 });
 
-// Server starten
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`API läuft auf Port ${PORT}`);
