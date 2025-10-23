@@ -1,3 +1,5 @@
+// server.js – Tourenplan Backend (Render-kompatibel, vollständige Version)
+
 import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
@@ -17,31 +19,36 @@ const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
+// -----------------------------------------------------
 // 🔐 Konfiguration
+// -----------------------------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "meinGeheimesToken";
 const PORT = process.env.PORT || 10000;
 
-// DB-Config (Render/Heroku-Style)
+// PostgreSQL (Render)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-// Upload-Verzeichnis vorbereiten
+// -----------------------------------------------------
+// 📁 Upload-Verzeichnis + statische Auslieferung
+// -----------------------------------------------------
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
-// Statische Auslieferung der Uploads
 app.use("/uploads", express.static(UPLOAD_DIR));
 
-// Multer (wir speichern erst im Speicher und schreiben dann manuell mit Wunsch-Dateinamen)
+// Multer: im Speicher ablegen, wir schreiben mit Wunsch-Dateinamen
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB
 });
 
-// --- Kleine Helper ---
+// -----------------------------------------------------
+// 🔧 Helpers
+// -----------------------------------------------------
 const withClient = async (fn) => {
   const client = await pool.connect();
   try {
@@ -59,12 +66,12 @@ const auth = (req, res, next) => {
     const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload;
     next();
-  } catch (e) {
+  } catch {
     return res.status(401).json({ error: "Ungültiger Token" });
   }
 };
 
-// String-Helper für Dateinamen (umlaute → ae/oe/ue, ß → ss, alles kleinschreiben)
+// Umlaute/Sonderzeichen für Dateinamen normalisieren (kleinschreibung)
 function slugifyLower(s) {
   if (!s) return "";
   const map = { ä: "ae", ö: "oe", ü: "ue", Ä: "ae", Ö: "oe", Ü: "ue", ß: "ss" };
@@ -85,13 +92,15 @@ function extFromMime(mime) {
   if (mime === "image/webp") return ".webp";
   if (mime === "image/heic") return ".heic";
   if (mime === "image/heif") return ".heif";
-  return ".jpg"; // Fallback
+  return ".jpg";
 }
 
-// --- DB Setup & Migration ---
+// -----------------------------------------------------
+// 🗄️ DB Schema & Migration
+// -----------------------------------------------------
 async function ensureSchema() {
   await withClient(async (c) => {
-    // fahrer
+    // Fahrer
     await c.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
@@ -99,7 +108,7 @@ async function ensureSchema() {
       );
     `);
 
-    // fahrzeuge
+    // Fahrzeuge (optional)
     await c.query(`
       CREATE TABLE IF NOT EXISTS fahrzeuge (
         id SERIAL PRIMARY KEY,
@@ -107,7 +116,7 @@ async function ensureSchema() {
       );
     `);
 
-    // touren
+    // Touren
     await c.query(`
       CREATE TABLE IF NOT EXISTS touren (
         id SERIAL PRIMARY KEY,
@@ -117,7 +126,7 @@ async function ensureSchema() {
       );
     `);
 
-    // stopps inkl. telefon, hinweis, status, foto_url
+    // Stopps
     await c.query(`
       CREATE TABLE IF NOT EXISTS stopps (
         id SERIAL PRIMARY KEY,
@@ -139,7 +148,7 @@ async function ensureSchema() {
     await c.query(`CREATE INDEX IF NOT EXISTS idx_touren_fahrer_datum ON touren(fahrer_id, datum);`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_stopps_tour_ordnung ON stopps(tour_id, reihenfolge);`);
 
-    // Migration: anmerkung → hinweis
+    // Migration: alte Spaltennamen/Erweiterungen
     const colCheck = await c.query(`
       SELECT column_name
       FROM information_schema.columns
@@ -149,6 +158,7 @@ async function ensureSchema() {
     if (cols.includes("anmerkung") && !cols.includes("hinweis")) {
       await c.query(`ALTER TABLE stopps RENAME COLUMN anmerkung TO hinweis;`);
     }
+
     const currentCols = (await c.query(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'stopps'
@@ -160,9 +170,17 @@ async function ensureSchema() {
   });
 }
 
-// --- Auth ---
+// -----------------------------------------------------
+// 🌡️ Healthcheck
+// -----------------------------------------------------
+app.get("/health", (_, res) => res.json({ ok: true }));
+
+// -----------------------------------------------------
+// 🔑 Auth
+// -----------------------------------------------------
 app.post("/login", async (req, res) => {
   const { username, password } = req.body || {};
+  // Feste Zugangsdaten wie besprochen:
   const validUser = (username === "Gehlenborg" && password === "Orga1023/");
   if (!validUser) return res.status(401).json({ error: "Login fehlgeschlagen" });
 
@@ -170,18 +188,23 @@ app.post("/login", async (req, res) => {
   res.json({ token });
 });
 
-// --- API ---
-app.get("/health", (_, res) => res.json({ ok: true }));
-
+// -----------------------------------------------------
+// 👤 Fahrer
+// -----------------------------------------------------
 app.get("/fahrer", auth, async (_, res) => {
   try {
-    const result = await withClient((c) => c.query(`SELECT id, name FROM fahrer ORDER BY name;`));
+    const result = await withClient((c) =>
+      c.query(`SELECT id, name FROM fahrer ORDER BY name;`)
+    );
     res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: "Fehler bei /fahrer", details: e.message });
   }
 });
 
+// -----------------------------------------------------
+// 🚚 Touren + Stopps pro Fahrer/Datum
+// -----------------------------------------------------
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   const { fahrerId, datum } = req.params;
   try {
@@ -219,6 +242,9 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   }
 });
 
+// -----------------------------------------------------
+// ✏️ Stopp aktualisieren (status/hinweis/telefon)
+// -----------------------------------------------------
 app.patch("/stopps/:stoppId", auth, async (req, res) => {
   const { stoppId } = req.params;
   const { status, hinweis, telefon } = req.body || {};
@@ -245,7 +271,9 @@ app.patch("/stopps/:stoppId", auth, async (req, res) => {
   }
 });
 
-// 🆕 Foto-Upload: POST /upload-photo/:stoppId  (multipart/form-data, Feld "photo")
+// -----------------------------------------------------
+// 📸 Foto-Upload: POST /upload-photo/:stoppId   (multipart/form-data, Feld "photo")
+// -----------------------------------------------------
 app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res) => {
   const { stoppId } = req.params;
   const file = req.file;
@@ -253,7 +281,7 @@ app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res
   if (!file) return res.status(400).json({ error: "Keine Datei erhalten" });
 
   try {
-    // Stopp + zugehörige Tour (für Datum) laden
+    // Stopp + zugehörige Tour (für Datum)
     const row = await withClient((c) =>
       c.query(
         `SELECT s.id AS stopp_id, s.kunde, t.datum
@@ -279,7 +307,7 @@ app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res
     const filename = `${base}${ext}`;
     const filePath = path.join(UPLOAD_DIR, filename);
 
-    // Falls Datei existiert, überschreiben (bewusst – gleicher Kunde/Tag => ersetzt)
+    // Überschreiben ist ok (gleiches Ziel ersetzt Foto)
     fs.writeFileSync(filePath, file.buffer);
 
     const publicUrl = `/uploads/${filename}`;
@@ -289,7 +317,7 @@ app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res
 
     res.json({
       success: true,
-      stoppId: stoppId,
+      stoppId,
       foto_url: publicUrl,
       filename,
     });
@@ -299,73 +327,116 @@ app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res
   }
 });
 
+// -----------------------------------------------------
+// 🧹 Reset aller Tabellen (mit Auth)
+// -----------------------------------------------------
+async function resetAll() {
+  await withClient(async (c) => {
+    await c.query("TRUNCATE stopps RESTART IDENTITY CASCADE;");
+    await c.query("TRUNCATE touren RESTART IDENTITY CASCADE;");
+    await c.query("TRUNCATE fahrzeuge RESTART IDENTITY CASCADE;");
+    await c.query("TRUNCATE fahrer RESTART IDENTITY CASCADE;");
+  });
+}
 app.post("/reset", auth, async (_, res) => {
   try {
-    await withClient(async (c) => {
-      await c.query("TRUNCATE stopps RESTART IDENTITY CASCADE;");
-      await c.query("TRUNCATE touren RESTART IDENTITY CASCADE;");
-      await c.query("TRUNCATE fahrzeuge RESTART IDENTITY CASCADE;");
-      await c.query("TRUNCATE fahrer RESTART IDENTITY CASCADE;");
-    });
+    await resetAll();
     res.json({ message: "✅ Tabellen geleert" });
   } catch (e) {
     res.status(500).json({ error: "Fehler bei /reset", details: e.message });
   }
 });
-
-app.post("/seed-demo", auth, async (_, res) => {
+app.get("/reset", auth, async (_, res) => { // kompatibel, falls Frontend GET nutzt
   try {
-    const { fahrerId, fahrzeugId, tourId } = await withClient(async (c) => {
-      // Fahrer
-      const f = await c.query(
-        `INSERT INTO fahrer(name)
-         VALUES ($1)
-         ON CONFLICT DO NOTHING
-         RETURNING id`,
-        ["Christoph Arlt"]
-      );
-      const finalFahrerId = f.rowCount ? f.rows[0].id : (await c.query(`SELECT id FROM fahrer WHERE name=$1`, ["Christoph Arlt"])).rows[0].id;
+    await resetAll();
+    res.json({ message: "✅ Tabellen geleert (GET)" });
+  } catch (e) {
+    res.status(500).json({ error: "Fehler bei /reset (GET)", details: e.message });
+  }
+});
 
-      // Fahrzeug
-      const v = await c.query(
-        `INSERT INTO fahrzeuge(kennzeichen)
-         VALUES ($1)
-         ON CONFLICT DO NOTHING
-         RETURNING id`,
-        ["CLP-CA 300"]
-      );
-      const finalFahrzeugId = v.rowCount ? v.rows[0].id : (await c.query(`SELECT id FROM fahrzeuge WHERE kennzeichen=$1`, ["CLP-CA 300"])).rows[0].id;
+// -----------------------------------------------------
+// 🌱 Demo-Daten einfügen (mit deinen Adressen)
+// -----------------------------------------------------
+async function seedDemo() {
+  return withClient(async (c) => {
+    // Fahrer
+    const f = await c.query(
+      `INSERT INTO fahrer(name)
+       VALUES ($1)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      ["Christoph Arlt"]
+    );
+    const fahrerId =
+      f.rowCount > 0
+        ? f.rows[0].id
+        : (await c.query(`SELECT id FROM fahrer WHERE name=$1`, ["Christoph Arlt"])).rows[0].id;
 
-      // Tour (heute)
-      const today = new Date().toISOString().slice(0, 10);
-      const t = await c.query(
-        `INSERT INTO touren(fahrer_id, fahrzeug_id, datum)
-         VALUES ($1,$2,$3)
-         RETURNING id`,
-        [finalFahrerId, finalFahrzeugId, today]
-      );
-      const finalTourId = t.rows[0].id;
+    // Fahrzeug (optional)
+    const v = await c.query(
+      `INSERT INTO fahrzeuge(kennzeichen)
+       VALUES ($1)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      ["CLP-CA 300"]
+    );
+    const fahrzeugId =
+      v.rowCount > 0
+        ? v.rows[0].id
+        : (await c.query(`SELECT id FROM fahrzeuge WHERE kennzeichen=$1`, ["CLP-CA 300"])).rows[0].id;
 
-      // Stopps
+    // Tour (heute)
+    const today = new Date().toISOString().slice(0, 10);
+    const t = await c.query(
+      `INSERT INTO touren(fahrer_id, fahrzeug_id, datum)
+       VALUES ($1,$2,$3)
+       RETURNING id`,
+      [fahrerId, fahrzeugId, today]
+    );
+    const tourId = t.rows[0].id;
+
+    // Stopps – NEUE reale Adressen (Reihenfolge 1..4)
+    const stopps = [
+      { reihenfolge: 1, kunde: "Kunde A", adresse: "Möhlenkamp 26, 49681 Garrel", kommission: "12345", telefon: null, hinweis: "Anlieferung am Vormittag", status: "" },
+      { reihenfolge: 2, kunde: "Kunde B", adresse: "Schwaneburger Weg 39, 26169 Friesoythe", kommission: "23456", telefon: null, hinweis: "Bitte vorher anrufen", status: "" },
+      { reihenfolge: 3, kunde: "Kunde C", adresse: "Am Rundtörn 18, 26135 Oldenburg", kommission: "34567", telefon: null, hinweis: "Hintereingang nutzen", status: "" },
+      { reihenfolge: 4, kunde: "Kunde D", adresse: "Wiesenstr. 31a, 28857 Syke", kommission: "45678", telefon: null, hinweis: "Ladung nur absetzen", status: "" },
+    ];
+
+    for (const s of stopps) {
       await c.query(
         `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, telefon, hinweis, status, foto_url)
-         VALUES
-         ($1,'Mühlenstraße 10, 49699 Lindern',52.8470,7.7692,1,'Kunde A','KOM-1001','0151 1234567','Anlieferung EG','', NULL),
-         ($1,'Cloppenburger Str. 1, 49661 Cloppenburg',52.8479,8.0476,2,'Kunde B','KOM-1002','0173 1234567','Hintereingang nutzen','', NULL),
-         ($1,'Staulinie 10, 26122 Oldenburg',53.1410,8.2150,3,'Kunde C','KOM-1003','0441 123456','Bitte anrufen bei Ankunft','', NULL)`,
-        [finalTourId]
+         VALUES ($1,$2,NULL,NULL,$3,$4,$5,$6,$7,$8,NULL)`,
+        [tourId, s.adresse, s.reihenfolge, s.kunde, s.kommission, s.telefon, s.hinweis, s.status]
       );
+    }
 
-      return { fahrerId: finalFahrerId, fahrzeugId: finalFahrzeugId, tourId: finalTourId };
-    });
+    return { fahrerId, fahrzeugId, tourId };
+  });
+}
 
-    res.json({ message: "✅ Demodaten eingefügt", fahrerId, fahrzeugId, tourId });
+// POST & GET anbieten, um Frontend-Kompatibilität sicherzustellen
+app.post("/seed-demo", auth, async (_, res) => {
+  try {
+    const result = await seedDemo();
+    res.json({ message: "✅ Demodaten eingefügt", ...result });
   } catch (e) {
     res.status(500).json({ error: "Fehler bei /seed-demo", details: e.message });
   }
 });
+app.get("/seed-demo", auth, async (_, res) => {
+  try {
+    const result = await seedDemo();
+    res.json({ message: "✅ Demodaten eingefügt (GET)", ...result });
+  } catch (e) {
+    res.status(500).json({ error: "Fehler bei /seed-demo (GET)", details: e.message });
+  }
+});
 
-// --- Start ---
+// -----------------------------------------------------
+// 🚀 Start
+// -----------------------------------------------------
 ensureSchema()
   .then(() => {
     app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
