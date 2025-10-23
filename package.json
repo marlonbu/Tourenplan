@@ -1,7 +1,7 @@
 {
   "name": "tourenplan-backend",
   "version": "1.0.0",
-  "description": "Backend für Tourenplan",
+  "description": "Backend für Tourenplan (Express + PostgreSQL + OneDrive Excel-Import)",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -12,7 +12,14 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
-    "pg": "^8.11.3"
-  }
+    "multer": "^1.4.5-lts.2",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.11.3",
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Marlon Bussmann",
+  "license": "MIT"
 }
