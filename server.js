@@ -3,8 +3,16 @@ import bodyParser from "body-parser";
 import pg from "pg";
 import cors from "cors";
 import jwt from "jsonwebtoken";
+import fs from "fs";
+import path from "path";
+import multer from "multer";
+import { fileURLToPath } from "url";
 
 const { Pool } = pg;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
@@ -13,12 +21,24 @@ app.use(cors());
 const JWT_SECRET = process.env.JWT_SECRET || "meinGeheimesToken";
 const PORT = process.env.PORT || 10000;
 
-// Render/Heroku-typische DB-Config
+// DB-Config (Render/Heroku-Style)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL
-    ? { rejectUnauthorized: false }
-    : false,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
+
+// Upload-Verzeichnis vorbereiten
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+// Statische Auslieferung der Uploads
+app.use("/uploads", express.static(UPLOAD_DIR));
+
+// Multer (wir speichern erst im Speicher und schreiben dann manuell mit Wunsch-Dateinamen)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB
 });
 
 // --- Kleine Helper ---
@@ -43,6 +63,30 @@ const auth = (req, res, next) => {
     return res.status(401).json({ error: "Ungültiger Token" });
   }
 };
+
+// String-Helper für Dateinamen (umlaute → ae/oe/ue, ß → ss, alles kleinschreiben)
+function slugifyLower(s) {
+  if (!s) return "";
+  const map = { ä: "ae", ö: "oe", ü: "ue", Ä: "ae", Ö: "oe", Ü: "ue", ß: "ss" };
+  const replaced = s
+    .split("")
+    .map((ch) => (map[ch] ? map[ch] : ch))
+    .join("");
+  return replaced
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_");
+}
+
+function extFromMime(mime) {
+  if (mime === "image/jpeg" || mime === "image/jpg") return ".jpg";
+  if (mime === "image/png") return ".png";
+  if (mime === "image/webp") return ".webp";
+  if (mime === "image/heic") return ".heic";
+  if (mime === "image/heif") return ".heif";
+  return ".jpg"; // Fallback
+}
 
 // --- DB Setup & Migration ---
 async function ensureSchema() {
@@ -73,7 +117,7 @@ async function ensureSchema() {
       );
     `);
 
-    // stopps – enthält jetzt: telefon, hinweis, status
+    // stopps inkl. telefon, hinweis, status, foto_url
     await c.query(`
       CREATE TABLE IF NOT EXISTS stopps (
         id SERIAL PRIMARY KEY,
@@ -84,71 +128,51 @@ async function ensureSchema() {
         reihenfolge INTEGER NOT NULL,
         kunde TEXT,
         kommission TEXT,
-        telefon TEXT,     -- ✅ neu
-        hinweis TEXT,     -- ✅ ersetzt "anmerkung"
-        status TEXT       -- ✅ neu (vom Fahrer beschreibbar)
+        telefon TEXT,
+        hinweis TEXT,
+        status TEXT,
+        foto_url TEXT
       );
     `);
 
-    // Indizes für Performance
+    // Indizes
     await c.query(`CREATE INDEX IF NOT EXISTS idx_touren_fahrer_datum ON touren(fahrer_id, datum);`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_stopps_tour_ordnung ON stopps(tour_id, reihenfolge);`);
 
-    // 🔁 Migration: falls alte Spalte "anmerkung" existiert -> nach "hinweis" umbenennen
+    // Migration: anmerkung → hinweis
     const colCheck = await c.query(`
       SELECT column_name
       FROM information_schema.columns
-      WHERE table_name = 'stopps' AND column_name IN ('anmerkung','hinweis','telefon','status')
+      WHERE table_name = 'stopps' AND column_name IN ('anmerkung','hinweis','telefon','status','foto_url')
     `);
     const cols = colCheck.rows.map(r => r.column_name);
-
     if (cols.includes("anmerkung") && !cols.includes("hinweis")) {
       await c.query(`ALTER TABLE stopps RENAME COLUMN anmerkung TO hinweis;`);
     }
-
-    // Falls Spalten fehlen (z. B. ältere Deploys), ergänzen
-    const refreshCols = (await c.query(`
+    const currentCols = (await c.query(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'stopps'
     `)).rows.map(r => r.column_name);
-
-    if (!refreshCols.includes("telefon")) {
-      await c.query(`ALTER TABLE stopps ADD COLUMN telefon TEXT;`);
-    }
-    if (!refreshCols.includes("hinweis")) {
-      await c.query(`ALTER TABLE stopps ADD COLUMN hinweis TEXT;`);
-    }
-    if (!refreshCols.includes("status")) {
-      await c.query(`ALTER TABLE stopps ADD COLUMN status TEXT;`);
-    }
+    if (!currentCols.includes("telefon")) await c.query(`ALTER TABLE stopps ADD COLUMN telefon TEXT;`);
+    if (!currentCols.includes("hinweis")) await c.query(`ALTER TABLE stopps ADD COLUMN hinweis TEXT;`);
+    if (!currentCols.includes("status")) await c.query(`ALTER TABLE stopps ADD COLUMN status TEXT;`);
+    if (!currentCols.includes("foto_url")) await c.query(`ALTER TABLE stopps ADD COLUMN foto_url TEXT;`);
   });
 }
 
 // --- Auth ---
-/**
- * POST /login
- * Body: { username, password }
- * Demo-Login gemäß Vorgabe:
- *   Benutzername: Gehlenborg
- *   Passwort: Orga1023/
- */
 app.post("/login", async (req, res) => {
   const { username, password } = req.body || {};
   const validUser = (username === "Gehlenborg" && password === "Orga1023/");
   if (!validUser) return res.status(401).json({ error: "Login fehlgeschlagen" });
 
-  const token = jwt.sign(
-    { u: "Gehlenborg", r: "admin" },
-    JWT_SECRET,
-    { expiresIn: "7d" } // Token-Lebensdauer; Auto-Logout kann später verkürzt werden
-  );
+  const token = jwt.sign({ u: "Gehlenborg", r: "admin" }, JWT_SECRET, { expiresIn: "7d" });
   res.json({ token });
 });
 
 // --- API ---
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-// Liste aller Fahrer
 app.get("/fahrer", auth, async (_, res) => {
   try {
     const result = await withClient((c) => c.query(`SELECT id, name FROM fahrer ORDER BY name;`));
@@ -158,11 +182,6 @@ app.get("/fahrer", auth, async (_, res) => {
   }
 });
 
-/**
- * GET /touren/:fahrerId/:datum
- * Liefert Tour + Stopps inkl. telefon, hinweis, status
- * datum-Format: YYYY-MM-DD
- */
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   const { fahrerId, datum } = req.params;
   try {
@@ -186,7 +205,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
     const tourId = tour.rows[0].id;
     const stopps = await withClient((c) =>
       c.query(
-        `SELECT id, tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, telefon, hinweis, status
+        `SELECT id, tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, telefon, hinweis, status, foto_url
          FROM stopps
          WHERE tour_id = $1
          ORDER BY reihenfolge ASC`,
@@ -200,11 +219,6 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   }
 });
 
-/**
- * PATCH /stopps/:stoppId
- * Body: { status?, hinweis?, telefon? }
- * Ermöglicht das beschreibbare Statusfeld (und optional Telefon/Hinweis-Anpassung)
- */
 app.patch("/stopps/:stoppId", auth, async (req, res) => {
   const { stoppId } = req.params;
   const { status, hinweis, telefon } = req.body || {};
@@ -213,22 +227,11 @@ app.patch("/stopps/:stoppId", auth, async (req, res) => {
   const values = [];
   let idx = 1;
 
-  if (typeof status !== "undefined") {
-    fields.push(`status = $${idx++}`);
-    values.push(status);
-  }
-  if (typeof hinweis !== "undefined") {
-    fields.push(`hinweis = $${idx++}`);
-    values.push(hinweis);
-  }
-  if (typeof telefon !== "undefined") {
-    fields.push(`telefon = $${idx++}`);
-    values.push(telefon);
-  }
+  if (typeof status !== "undefined") { fields.push(`status = $${idx++}`); values.push(status); }
+  if (typeof hinweis !== "undefined") { fields.push(`hinweis = $${idx++}`); values.push(hinweis); }
+  if (typeof telefon !== "undefined") { fields.push(`telefon = $${idx++}`); values.push(telefon); }
 
-  if (fields.length === 0) {
-    return res.status(400).json({ error: "Keine Felder übergeben" });
-  }
+  if (fields.length === 0) return res.status(400).json({ error: "Keine Felder übergeben" });
 
   values.push(stoppId);
 
@@ -242,10 +245,60 @@ app.patch("/stopps/:stoppId", auth, async (req, res) => {
   }
 });
 
-/**
- * POST /reset
- * Leert Tabellen (Reihenfolge wegen FK)
- */
+// 🆕 Foto-Upload: POST /upload-photo/:stoppId  (multipart/form-data, Feld "photo")
+app.post("/upload-photo/:stoppId", auth, upload.single("photo"), async (req, res) => {
+  const { stoppId } = req.params;
+  const file = req.file;
+
+  if (!file) return res.status(400).json({ error: "Keine Datei erhalten" });
+
+  try {
+    // Stopp + zugehörige Tour (für Datum) laden
+    const row = await withClient((c) =>
+      c.query(
+        `SELECT s.id AS stopp_id, s.kunde, t.datum
+         FROM stopps s
+         JOIN touren t ON t.id = s.tour_id
+         WHERE s.id = $1
+         LIMIT 1`,
+        [stoppId]
+      )
+    );
+
+    if (row.rowCount === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
+
+    const stopp = row.rows[0];
+    const kundeSlug = slugifyLower(stopp.kunde || "kunde");
+    const d = new Date(stopp.datum);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const base = `${kundeSlug}_${dd}_${mm}_${yyyy}`;
+
+    const ext = extFromMime(file.mimetype);
+    const filename = `${base}${ext}`;
+    const filePath = path.join(UPLOAD_DIR, filename);
+
+    // Falls Datei existiert, überschreiben (bewusst – gleicher Kunde/Tag => ersetzt)
+    fs.writeFileSync(filePath, file.buffer);
+
+    const publicUrl = `/uploads/${filename}`;
+    await withClient((c) =>
+      c.query(`UPDATE stopps SET foto_url = $1 WHERE id = $2`, [publicUrl, stoppId])
+    );
+
+    res.json({
+      success: true,
+      stoppId: stoppId,
+      foto_url: publicUrl,
+      filename,
+    });
+  } catch (e) {
+    console.error("Upload-Fehler:", e);
+    res.status(500).json({ error: "Fehler beim Foto-Upload", details: e.message });
+  }
+});
+
 app.post("/reset", auth, async (_, res) => {
   try {
     await withClient(async (c) => {
@@ -260,11 +313,6 @@ app.post("/reset", auth, async (_, res) => {
   }
 });
 
-/**
- * POST /seed-demo
- * Erstellt Demodaten für Fahrer "Christoph Arlt" (Lindern ↔ Oldenburg)
- * mit neuen Spalten: telefon, hinweis, status
- */
 app.post("/seed-demo", auth, async (_, res) => {
   try {
     const { fahrerId, fahrzeugId, tourId } = await withClient(async (c) => {
@@ -300,11 +348,11 @@ app.post("/seed-demo", auth, async (_, res) => {
 
       // Stopps
       await c.query(
-        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, telefon, hinweis, status)
+        `INSERT INTO stopps (tour_id, adresse, lat, lng, reihenfolge, kunde, kommission, telefon, hinweis, status, foto_url)
          VALUES
-         ($1,'Mühlenstraße 10, 49699 Lindern',52.8470,7.7692,1,'Kunde A','KOM-1001','0151 1234567','Anlieferung EG',''),
-         ($1,'Cloppenburger Str. 1, 49661 Cloppenburg',52.8479,8.0476,2,'Kunde B','KOM-1002','0173 1234567','Hintereingang nutzen',''),
-         ($1,'Staulinie 10, 26122 Oldenburg',53.1410,8.2150,3,'Kunde C','KOM-1003','0441 123456','Bitte anrufen bei Ankunft','')`,
+         ($1,'Mühlenstraße 10, 49699 Lindern',52.8470,7.7692,1,'Kunde A','KOM-1001','0151 1234567','Anlieferung EG','', NULL),
+         ($1,'Cloppenburger Str. 1, 49661 Cloppenburg',52.8479,8.0476,2,'Kunde B','KOM-1002','0173 1234567','Hintereingang nutzen','', NULL),
+         ($1,'Staulinie 10, 26122 Oldenburg',53.1410,8.2150,3,'Kunde C','KOM-1003','0441 123456','Bitte anrufen bei Ankunft','', NULL)`,
         [finalTourId]
       );
 
@@ -317,7 +365,7 @@ app.post("/seed-demo", auth, async (_, res) => {
   }
 });
 
-// --- Serverstart ---
+// --- Start ---
 ensureSchema()
   .then(() => {
     app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
