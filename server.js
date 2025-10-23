@@ -1,5 +1,13 @@
-// server.js – Tourenplan Backend (Render-kompatibel) mit Excel-Import (Downfill von Datum/Fahrer)
-// ------------------------------------------------------------------------------------------------
+// server.js – Tourenplan Backend (Render-kompatibel)
+// ---------------------------------------------------------------
+// Features:
+// - JWT Login
+// - Fahrer-/Tour-/Stopp-APIs
+// - Wochen-Endpunkt /touren-woche/:kw (Mo–So, chronologisch)
+// - Excel-Import: manuell (POST /import-excel) & automatisch alle 30 Min.
+// - Excel-Layout: Header ab Zeile 8, Downfill von Datum & Fahrer, mehrere Stopps pro Tag
+// - Pro Fahrer+Datum: vorhandene Tour/Stopps werden vor Neuimport gelöscht (keine Duplikate)
+// ---------------------------------------------------------------
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -26,6 +34,13 @@ app.use(cors());
 // -----------------------------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "meinGeheimesToken";
 const PORT = process.env.PORT || 10000;
+
+// OneDrive Excel: Download-Link & Intervall (ms)
+const EXCEL_URL =
+  process.env.EXCEL_URL ||
+  "https://gehlenborgsitzmoebel-my.sharepoint.com/:x:/g/personal/marlon_moebel-gehlenborg_de/EfXEyJHsUKdEj-VGjbSKCBsBAEl-6Fx5_k9LtOTyljv5ig?download=1";
+
+const IMPORT_INTERVAL_MS = Number(process.env.IMPORT_INTERVAL_MS || 30 * 60 * 1000); // 30 Min
 
 // PostgreSQL (Render)
 const pool = new Pool({
@@ -78,7 +93,7 @@ async function ensureSchema() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS stopps (
         id SERIAL PRIMARY KEY,
-        tour_id INTEGER REFERENCES touren(id),
+        tour_id INTEGER REFERENCES touren(id) ON DELETE CASCADE,
         kunde TEXT,
         adresse TEXT,
         kommission TEXT,
@@ -90,6 +105,9 @@ async function ensureSchema() {
         position INTEGER
       );
     `);
+    // Indexe für schnellere wöchentliche Abfragen & Ersetzungen
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_touren_fahrer_datum ON touren(fahrer_id, datum);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_stopps_tour_id ON stopps(tour_id);`);
   } finally {
     client.release();
   }
@@ -103,7 +121,8 @@ function parseGermanDate(dstr) {
   if (typeof dstr === "number") {
     const epoch = XLSX.SSF.parse_date_code(dstr);
     if (!epoch) return null;
-    return new Date(Date.UTC(epoch.y, epoch.m - 1, epoch.d));
+    // Achtung: epoch ist UTC; wir erzeugen lokales Date-Objekt
+    return new Date(epoch.y, epoch.m - 1, epoch.d);
   }
   if (typeof dstr === "string" && dstr.includes(".")) {
     const [dd, mm, yyyy] = dstr.split(".");
@@ -133,6 +152,16 @@ function mondayOfISOWeek(week, year) {
   return monday;
 }
 
+// Header ab Zeile 8
+function adjustRefToRow8(sheet) {
+  const ref = sheet["!ref"];
+  if (!ref) return sheet["!ref"];
+  const [start, end] = ref.split(":");
+  const startCol = start.replace(/[0-9]/g, "") || "A";
+  return `${startCol}8:${end}`;
+}
+
+// Key-Normalisierung (DE-Header)
 function normalizeKey(k) {
   if (!k) return "";
   const key = String(k).trim().toLowerCase();
@@ -154,15 +183,6 @@ function mapRowKeys(obj) {
   const mapped = {};
   for (const k of Object.keys(obj)) mapped[normalizeKey(k)] = obj[k];
   return mapped;
-}
-
-// Header ab Zeile 8
-function adjustRefToRow8(sheet) {
-  const ref = sheet["!ref"];
-  if (!ref) return sheet["!ref"];
-  const [start, end] = ref.split(":");
-  const startCol = start.replace(/[0-9]/g, "") || "A";
-  return `${startCol}8:${end}`;
 }
 
 // -----------------------------------------------------
@@ -206,6 +226,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
 
 // -----------------------------------------------------
 // 🆕 Wochen-Endpunkt (alle Fahrer, Mo–So, chronologisch)
+// -----------------------------------------------------
 app.get("/touren-woche/:kw", auth, async (req, res) => {
   const kw = parseInt(req.params.kw);
   if (isNaN(kw) || kw < 1 || kw > 53) {
@@ -243,6 +264,7 @@ app.get("/touren-woche/:kw", auth, async (req, res) => {
 
 // -----------------------------------------------------
 // 🌱 Demo-Daten (Beispiel)
+// -----------------------------------------------------
 app.get("/seed-demo", auth, async (_, res) => {
   await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY;");
   const fahrer = await pool.query("INSERT INTO fahrer (name) VALUES ('Christoph Arlt') RETURNING id;");
@@ -274,169 +296,237 @@ app.get("/seed-demo", auth, async (_, res) => {
 
 // -----------------------------------------------------
 // 🧹 Reset
+// -----------------------------------------------------
 app.get("/reset", auth, async (_, res) => {
   await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY;");
   res.json({ message: "Tabellen geleert" });
 });
 
 // -----------------------------------------------------
-// 📥 Excel-Import (Downfill von Datum & Fahrer, Multi-Stop pro Tag)
+// 📥 MANUELLER Excel-Import (optional nutzbar)
 // Body:
 //   { "source": "local", "path": "/mnt/data/Tourenplan.xlsx" }
 //   { "source": "url",   "url":  "https://..." }
 // Optional: { "sheet": "Tabelle1" }
+// -----------------------------------------------------
 app.post("/import-excel", auth, async (req, res) => {
-  const { source, path: localPath, url, sheet } = req.body || {};
   try {
-    let workbook;
-    if (source === "local" && localPath) {
-      const abs = localPath.startsWith("/") ? localPath : path.resolve(__dirname, localPath);
-      if (!fs.existsSync(abs)) return res.status(400).json({ error: "Datei nicht gefunden", path: abs });
-      const buf = fs.readFileSync(abs);
-      workbook = XLSX.read(buf, { type: "buffer" });
-    } else if (source === "url" && url) {
-      const r = await fetch(url);
-      if (!r.ok) return res.status(400).json({ error: "Download fehlgeschlagen", status: r.status });
-      const ab = await r.arrayBuffer();
-      workbook = XLSX.read(Buffer.from(ab), { type: "buffer" });
-    } else {
-      return res.status(400).json({ error: "Bitte source + path (local) oder source + url angeben" });
-    }
-
-    const sheetName = sheet || workbook.SheetNames[0];
-    const ws = workbook.Sheets[sheetName];
-    if (!ws) return res.status(400).json({ error: "Worksheet nicht gefunden", sheet: sheetName });
-
-    // Bereich ab Zeile 8 (Header in Zeile 8)
-    const originalRef = ws["!ref"];
-    ws["!ref"] = adjustRefToRow8(ws);
-    let rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    ws["!ref"] = originalRef;
-
-    // Keys normalisieren
-    rows = rows.map(mapRowKeys);
-
-    // Downfill von Datum & Fahrer innerhalb der Liste
-    let lastDate = null;
-    let lastFahrer = "";
-    rows = rows.map((r) => {
-      // Datum ggf. übernehmen
-      const dParsed = parseGermanDate(r.datum);
-      if (dParsed) {
-        lastDate = dParsed;
-      }
-      // Fahrer ggf. übernehmen
-      if ((r.fahrer || "").toString().trim() !== "") {
-        lastFahrer = (r.fahrer || "").toString().trim();
-      }
-      return {
-        ...r,
-        _parsedDate: lastDate ? new Date(lastDate) : null,
-        _driverFilled: lastFahrer,
-      };
-    });
-
-    // Nur Zeilen importieren, die inhaltlich relevant sind
-    rows = rows.filter((r) => {
-      const hasAny =
-        (r.adresse && String(r.adresse).trim() !== "") ||
-        (r.kommission && String(r.kommission).trim() !== "") ||
-        (r._driverFilled && String(r._driverFilled).trim() !== "");
-      return hasAny && !!r._parsedDate;
-    });
-
-    const client = await pool.connect();
-    try {
-      // Caches
-      const fahrerIds = new Map(); // name -> id
-      const tourIds = new Map();   // `${fahrerId}|${datumIso}` -> id
-      const nextPos = new Map();   // tourId -> next position (auto)
-
-      async function getFahrerId(name) {
-        const key = (name || "").trim() || "Unbekannter Fahrer";
-        if (fahrerIds.has(key)) return fahrerIds.get(key);
-        let q = await client.query("SELECT id FROM fahrer WHERE name=$1 LIMIT 1;", [key]);
-        if (q.rowCount === 0) {
-          q = await client.query("INSERT INTO fahrer (name) VALUES ($1) RETURNING id;", [key]);
-        }
-        const id = q.rows[0].id;
-        fahrerIds.set(key, id);
-        return id;
-      }
-
-      async function getTourId(fahrerId, datumIso) {
-        const key = `${fahrerId}|${datumIso}`;
-        if (tourIds.has(key)) return tourIds.get(key);
-        let q = await client.query("SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2 LIMIT 1;", [fahrerId, datumIso]);
-        if (q.rowCount === 0) {
-          q = await client.query("INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING id;", [fahrerId, datumIso]);
-        }
-        const id = q.rows[0].id;
-        tourIds.set(key, id);
-        return id;
-      }
-
-      let createdStopps = 0;
-      let skipped = 0;
-
-      for (const r of rows) {
-        const d = r._parsedDate;
-        if (!d) { skipped++; continue; }
-        const datumIso = d.toISOString().split("T")[0];
-
-        const fahrerName = r._driverFilled || (r.fahrer || "").toString().trim() || "Unbekannter Fahrer";
-        const fahrerId = await getFahrerId(fahrerName);
-        const tourId = await getTourId(fahrerId, datumIso);
-
-        // Positionsfindung
-        let position = null;
-        if (r.position !== undefined && r.position !== "") {
-          const p = parseInt(r.position, 10);
-          if (!isNaN(p)) position = p;
-        }
-        if (position == null) {
-          const current = nextPos.get(tourId) || 1;
-          position = current;
-          nextPos.set(tourId, current + 1);
-        }
-
-        // Inhalte
-        const adresse = (r.adresse || "").toString().trim();
-        const kommission = (r.kommission || "").toString().trim();
-        const telefon = (r.telefon || "").toString().trim();
-        const hinweis = (r.hinweis || "").toString().trim();
-        const kunde = (r.kunde || "").toString().trim() || null;
-        const ankunft = (r.ankunft || "").toString().trim() || null;
-
-        // Wenn wirklich gar kein Stopp-Inhalt da ist → überspringen
-        if (!adresse && !kommission) { skipped++; continue; }
-
-        await client.query(
-          `INSERT INTO stopps (tour_id, kunde, adresse, kommission, hinweis, telefon, ankunft, position)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
-          [tourId, kunde, adresse, kommission, hinweis, telefon, ankunft, position]
-        );
-
-        createdStopps++;
-      }
-
-      res.json({
-        message: "Excel-Import abgeschlossen",
-        rowsProcessed: rows.length,
-        stoppsCreated: createdStopps,
-        skipped,
-      });
-    } finally {
-      client.release();
-    }
+    const result = await importExcel({ mode: "manual", body: req.body || {} });
+    res.json(result);
   } catch (err) {
-    console.error("Fehler beim Excel-Import:", err);
+    console.error("Fehler beim manuellen Excel-Import:", err);
     res.status(500).json({ error: "Fehler beim Excel-Import", detail: String(err) });
   }
 });
 
 // -----------------------------------------------------
-// 🚀 Start
-ensureSchema().then(() => {
+// 🧠 Kern: Excel laden, parsen & in DB schreiben (mit Lösch/Neu je Fahrer+Datum)
+// -----------------------------------------------------
+async function importExcel({ mode = "auto", body = {} } = {}) {
+  // 1) Datei laden (URL oder lokal)
+  let workbook;
+  if (mode === "manual") {
+    const { source, path: localPath, url, sheet } = body;
+    if (source === "local" && localPath) {
+      const abs = localPath.startsWith("/") ? localPath : path.resolve(__dirname, localPath);
+      if (!fs.existsSync(abs)) throw new Error(`Datei nicht gefunden: ${abs}`);
+      const buf = fs.readFileSync(abs);
+      workbook = XLSX.read(buf, { type: "buffer" });
+    } else if (source === "url" && url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`Download fehlgeschlagen: HTTP ${r.status}`);
+      const ab = await r.arrayBuffer();
+      workbook = XLSX.read(Buffer.from(ab), { type: "buffer" });
+    } else {
+      // fallback: System-URL (OneDrive)
+      const r = await fetch(EXCEL_URL);
+      if (!r.ok) throw new Error(`Download fehlgeschlagen: HTTP ${r.status}`);
+      const ab = await r.arrayBuffer();
+      workbook = XLSX.read(Buffer.from(ab), { type: "buffer" });
+    }
+  } else {
+    // auto: immer System-URL nutzen
+    const r = await fetch(EXCEL_URL);
+    if (!r.ok) throw new Error(`Download fehlgeschlagen: HTTP ${r.status}`);
+    const ab = await r.arrayBuffer();
+    workbook = XLSX.read(Buffer.from(ab), { type: "buffer" });
+  }
+
+  // 2) Sheet & Header ab Zeile 8
+  const sheetName = workbook.SheetNames[0];
+  const ws = workbook.Sheets[sheetName];
+  if (!ws) throw new Error(`Worksheet nicht gefunden: ${sheetName}`);
+
+  const originalRef = ws["!ref"];
+  ws["!ref"] = adjustRefToRow8(ws);
+  let rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  ws["!ref"] = originalRef;
+
+  // 3) Keys normalisieren & Downfill von Datum/Fahrer
+  rows = rows.map(mapRowKeys);
+
+  let lastDate = null;
+  let lastFahrer = "";
+  rows = rows.map((r) => {
+    const dParsed = parseGermanDate(r.datum);
+    if (dParsed) lastDate = dParsed;
+    if ((r.fahrer || "").toString().trim() !== "") lastFahrer = (r.fahrer || "").toString().trim();
+    return {
+      ...r,
+      _parsedDate: lastDate ? new Date(lastDate) : null,
+      _driverFilled: lastFahrer,
+    };
+  });
+
+  // 4) Relevante Zeilen: nur solche mit Inhalt (Adresse/Kommission/Fahrer) UND gültigem Datum
+  rows = rows.filter((r) => {
+    const hasAny =
+      (r.adresse && String(r.adresse).trim() !== "") ||
+      (r.kommission && String(r.kommission).trim() !== "") ||
+      (r._driverFilled && String(r._driverFilled).trim() !== "");
+    return hasAny && !!r._parsedDate;
+  });
+
+  const client = await pool.connect();
+  try {
+    const fahrerIds = new Map(); // name -> id
+    async function getFahrerId(name) {
+      const key = (name || "").trim() || "Unbekannter Fahrer";
+      if (fahrerIds.has(key)) return fahrerIds.get(key);
+      let q = await client.query("SELECT id FROM fahrer WHERE name=$1 LIMIT 1;", [key]);
+      if (q.rowCount === 0) {
+        q = await client.query("INSERT INTO fahrer (name) VALUES ($1) RETURNING id;", [key]);
+      }
+      const id = q.rows[0].id;
+      fahrerIds.set(key, id);
+      return id;
+    }
+
+    // Wir sammeln alle (fahrerId, datumIso) Paare, die im Import vorkommen.
+    // Für jedes Paar löschen wir VOR dem Einfügen vorhandene Touren/Stopps.
+    const pairsToReplace = new Map(); // key -> { fahrerId, datumIso }
+    const preparedRows = [];
+
+    for (const r of rows) {
+      const d = r._parsedDate;
+      if (!d) continue;
+      const datumIso = d.toISOString().split("T")[0];
+      const fahrerName = r._driverFilled || (r.fahrer || "").toString().trim() || "Unbekannter Fahrer";
+      const fahrerId = await getFahrerId(fahrerName);
+
+      const key = `${fahrerId}|${datumIso}`;
+      if (!pairsToReplace.has(key)) pairsToReplace.set(key, { fahrerId, datumIso });
+
+      // Inhalte vorbereiten
+      const adresse = (r.adresse || "").toString().trim();
+      const kommission = (r.kommission || "").toString().trim();
+      const telefon = (r.telefon || "").toString().trim();
+      const hinweis = (r.hinweis || "").toString().trim();
+      const kunde = (r.kunde || "").toString().trim() || null;
+      const ankunft = (r.ankunft || "").toString().trim() || null;
+
+      let position = null;
+      if (r.position !== undefined && r.position !== "") {
+        const p = parseInt(r.position, 10);
+        if (!isNaN(p)) position = p;
+      }
+
+      // Nur echte Stopps (Adresse oder Kommission) vormerken
+      if (adresse || kommission) {
+        preparedRows.push({
+          fahrerId,
+          datumIso,
+          kunde,
+          adresse,
+          kommission,
+          hinweis,
+          telefon,
+          ankunft,
+          position,
+        });
+      }
+    }
+
+    // Für jedes betroffene (fahrerId, datumIso) Paar: vorhandene Touren + Stopps löschen
+    for (const { fahrerId, datumIso } of pairsToReplace.values()) {
+      const tours = await client.query(
+        "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2;",
+        [fahrerId, datumIso]
+      );
+      if (tours.rowCount > 0) {
+        const tourIds = tours.rows.map((r) => r.id);
+        // Stopps löschen (ON DELETE CASCADE ist gesetzt, aber sicherheitshalber explizit):
+        await client.query("DELETE FROM stopps WHERE tour_id = ANY($1::int[]);", [tourIds]);
+        await client.query("DELETE FROM touren WHERE id = ANY($1::int[]);", [tourIds]);
+      }
+      // Neue Tour anlegen
+      await client.query("INSERT INTO touren (fahrer_id, datum) VALUES ($1,$2);", [fahrerId, datumIso]);
+    }
+
+    // Nach Löschen neue Tour-IDs aufbauen
+    const tourIdCache = new Map(); // `${fahrerId}|${datumIso}` -> id
+    async function ensureTourId(fahrerId, datumIso) {
+      const key = `${fahrerId}|${datumIso}`;
+      if (tourIdCache.has(key)) return tourIdCache.get(key);
+      const q = await client.query(
+        "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2 LIMIT 1;",
+        [fahrerId, datumIso]
+      );
+      const id = q.rows[0].id;
+      tourIdCache.set(key, id);
+      return id;
+    }
+
+    // Positions-Autoinkrement pro Tour (falls Position fehlt)
+    const nextPos = new Map(); // tourId -> next position
+
+    let createdStopps = 0;
+    for (const p of preparedRows) {
+      const tourId = await ensureTourId(p.fahrerId, p.datumIso);
+
+      let pos = p.position;
+      if (pos == null) {
+        const current = nextPos.get(tourId) || 1;
+        pos = current;
+        nextPos.set(tourId, current + 1);
+      }
+
+      await client.query(
+        `INSERT INTO stopps (tour_id, kunde, adresse, kommission, hinweis, telefon, ankunft, position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8);`,
+        [tourId, p.kunde, p.adresse, p.kommission, p.hinweis, p.telefon, p.ankunft, pos]
+      );
+      createdStopps++;
+    }
+
+    return {
+      message: "Excel-Import abgeschlossen",
+      pairsReplaced: pairsToReplace.size,
+      stoppsCreated: createdStopps,
+      rowsConsidered: rows.length,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// -----------------------------------------------------
+// ⏱️ Automatischer Import alle 30 Minuten
+// -----------------------------------------------------
+async function runAutoImportOnce() {
+  try {
+    const result = await importExcel({ mode: "auto" });
+    console.log("✅ Auto-Import OK:", result);
+  } catch (err) {
+    console.error("⚠️ Auto-Import Fehler:", err?.message || err);
+  }
+}
+
+// Beim Serverstart einmal versuchen:
+ensureSchema().then(async () => {
   app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
+  // Erstimport beim Start:
+  runAutoImportOnce();
+  // Danach im Intervall:
+  setInterval(runAutoImportOnce, IMPORT_INTERVAL_MS);
 });
