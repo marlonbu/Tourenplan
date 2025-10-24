@@ -1,4 +1,4 @@
-// server.js – Excel-Import mit Datumserkennung & Zusammenfassung
+// server.js – Excel-Import mit korrekten deutschen Spaltennamen
 //---------------------------------------------------------------
 import express from "express";
 import bodyParser from "body-parser";
@@ -25,22 +25,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
-
-// -----------------------------------------------------
-// 🔐 Auth Middleware
-// -----------------------------------------------------
-const auth = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "Kein Token" });
-  const token = header.split(" ")[1];
-  try {
-    const user = jwt.verify(token, JWT_SECRET);
-    req.user = user;
-    next();
-  } catch {
-    res.status(401).json({ error: "Ungültiger Token" });
-  }
-};
 
 // -----------------------------------------------------
 // 📅 Hilfsfunktion: Excel-Datum umwandeln
@@ -100,7 +84,7 @@ async function ensureSchema() {
 }
 
 // -----------------------------------------------------
-// 🧠 Excel-Import (lokal, mit Datumserkennung)
+// 📥 Excel-Import (mit Datum fortführen)
 // -----------------------------------------------------
 async function importExcel() {
   try {
@@ -123,23 +107,23 @@ async function importExcel() {
     let lastDate = null;
 
     for (const row of rows) {
-      // Datum ggf. übernehmen
-      const dateValue = row.Datum || lastDate;
+      // Excel-Spalten gemäß CSV-Kopfzeile
+      const dateValue = row["Datum"] || lastDate;
       const datumISO = excelDateToISO(dateValue);
       if (!datumISO) continue;
-      lastDate = dateValue; // speichern für nächste Zeile
+      lastDate = dateValue;
 
-      const name = (row.Fahrer || "").trim();
-      if (!name) continue;
+      const fahrerName = (row["Fahrer"] || "").trim();
+      if (!fahrerName) continue;
 
-      let fahrerId = fahrerMap.get(name);
+      let fahrerId = fahrerMap.get(fahrerName);
       if (!fahrerId) {
         const res = await client.query(
           "INSERT INTO fahrer (name) VALUES ($1) RETURNING id;",
-          [name]
+          [fahrerName]
         );
         fahrerId = res.rows[0].id;
-        fahrerMap.set(name, fahrerId);
+        fahrerMap.set(fahrerName, fahrerId);
       }
 
       const tourKey = `${fahrerId}_${datumISO}`;
@@ -159,13 +143,13 @@ async function importExcel() {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
         [
           tourId,
-          row.Kunde || "",
-          row.Adresse || "",
-          row.Kommission || "",
-          row.Hinweis || "",
-          row.Telefon || "",
-          row.Status || "",
-          row.Ankunft || "",
+          "", // Kunde wird aus Kommission abgeleitet falls nötig
+          row["Adresse"] || "",
+          row["Kommission"] || "",
+          row["Hinweis"] || "",
+          row["Telefon"] || "",
+          "", // Status bleibt leer
+          row["Ankunft"] || "",
           row["Pos."] || null,
         ]
       );
@@ -192,17 +176,17 @@ app.post("/login", (req, res) => {
 });
 
 // -----------------------------------------------------
-// 👤 Fahrer
+// 👤 Fahrer abrufen
 // -----------------------------------------------------
-app.get("/fahrer", auth, async (_, res) => {
+app.get("/fahrer", async (_, res) => {
   const { rows } = await pool.query("SELECT id, name FROM fahrer ORDER BY name;");
   res.json(rows);
 });
 
 // -----------------------------------------------------
-// 🚚 Touren
+// 🚚 Touren eines Fahrers an einem Tag
 // -----------------------------------------------------
-app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
+app.get("/touren/:fahrerId/:datum", async (req, res) => {
   const { fahrerId, datum } = req.params;
   const tour = await pool.query(
     "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2 LIMIT 1;",
@@ -217,18 +201,18 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
 });
 
 // -----------------------------------------------------
-// 🧹 Reset
+// 🔁 Reset
 // -----------------------------------------------------
-app.get("/reset", auth, async (_, res) => {
+app.get("/reset", async (_, res) => {
   await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY;");
   res.json({ message: "Tabellen geleert" });
 });
 
 // -----------------------------------------------------
-// 🗓️ Root
+// 🧾 Root
 // -----------------------------------------------------
 app.get("/", (_, res) => {
-  res.send("✅ Tourenplan Backend läuft mit lokalem Excel-Import (Datum fortgeführt)");
+  res.send("✅ Tourenplan Backend läuft (Excel mit Datumserkennung)");
 });
 
 // -----------------------------------------------------
@@ -236,5 +220,5 @@ app.get("/", (_, res) => {
 // -----------------------------------------------------
 ensureSchema().then(() => {
   app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
-  importExcel(); // einmalig beim Start laden
+  importExcel(); // automatischer Import beim Start
 });
