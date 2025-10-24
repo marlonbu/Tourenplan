@@ -3,9 +3,9 @@
 // Features:
 // - JWT Login
 // - Fahrer-/Tour-/Stopp-APIs
-// - Wochen-Endpunkt /touren-woche/:kw (Mo–So, chronologisch)
-// - Excel-Import (OneDrive, automatischer Sync alle 30 Min)
-// - Automatische Spaltenerstellung für 'position' (kein Shell nötig)
+// - Wochen-Endpunkt /touren-woche/:kw
+// - Excel-Import (OneDrive, Auto-Sync alle 30 Min)
+// - Automatische Spaltenerstellung (ankunft, position)
 // ---------------------------------------------------------------
 
 import express from "express";
@@ -33,15 +33,12 @@ app.use(cors());
 // -----------------------------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "meinGeheimesToken";
 const PORT = process.env.PORT || 10000;
-
-// OneDrive Excel URL
 const EXCEL_URL =
   process.env.EXCEL_URL ||
   "https://gehlenborgsitzmoebel-my.sharepoint.com/:x:/g/personal/marlon_moebel-gehlenborg_de/EfXEyJHsUKdEj-VGjbSKCBsBAEl-6Fx5_k9LtOTyljv5ig?download=1";
+const IMPORT_INTERVAL_MS = Number(process.env.IMPORT_INTERVAL_MS || 30 * 60 * 1000); // 30 Min
 
-const IMPORT_INTERVAL_MS = Number(process.env.IMPORT_INTERVAL_MS || 30 * 60 * 1000); // 30 Minuten
-
-// PostgreSQL (Render)
+// PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
@@ -92,14 +89,14 @@ async function ensureSchema() {
         hinweis TEXT,
         telefon TEXT,
         status TEXT,
-        foto_url TEXT,
-        ankunft TEXT
+        foto_url TEXT
       );
     `);
 
-    // Prüft und erstellt Spalte 'position'
+    // 🧩 fehlende Spalten automatisch ergänzen
+    await client.query(`ALTER TABLE stopps ADD COLUMN IF NOT EXISTS ankunft TEXT;`);
     await client.query(`ALTER TABLE stopps ADD COLUMN IF NOT EXISTS position INTEGER;`);
-    console.log("✅ Spalte 'position' überprüft/erstellt");
+    console.log("✅ Spalten 'ankunft' & 'position' überprüft/erstellt");
 
     await client.query(`CREATE INDEX IF NOT EXISTS idx_touren_fahrer_datum ON touren(fahrer_id, datum);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_stopps_tour_id ON stopps(tour_id);`);
@@ -162,7 +159,7 @@ app.get("/", (_, res) => {
 });
 
 // -----------------------------------------------------
-// 🧠 Import-Logik (gekürzt zur Übersicht, funktionsgleich mit deiner Version)
+// 🧠 Auto-Import aus Excel
 // -----------------------------------------------------
 async function runAutoImportOnce() {
   try {
@@ -173,8 +170,6 @@ async function runAutoImportOnce() {
     const wb = XLSX.read(buf, { type: "buffer" });
     const ws = wb.Sheets[wb.SheetNames[0]];
     if (!ws) throw new Error("Kein Sheet gefunden");
-
-    // Sheet ab Zeile 8 lesen
     const range = ws["!ref"].split(":")[1];
     ws["!ref"] = `A8:${range}`;
     const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
