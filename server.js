@@ -1,67 +1,49 @@
-// server.js – Tourenplan Backend (Render-kompatibel)
+// server.js – Lokaler Excel-Import (ohne OneDrive)
 // ---------------------------------------------------------------
-// Features:
-// - JWT Login
-// - Fahrer-/Tour-/Stopp-APIs
-// - Wochen-Endpunkt /touren-woche/:kw
-// - Excel-Import (OneDrive, Auto-Sync alle 30 Min)
-// - Automatische Spaltenerstellung (ankunft, position)
-// ---------------------------------------------------------------
-
 import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
 import cors from "cors";
 import jwt from "jsonwebtoken";
-import fs from "fs";
 import path from "path";
-import multer from "multer";
-import { fileURLToPath } from "url";
+import fs from "fs";
 import XLSX from "xlsx";
-import fetch from "node-fetch";
+import { fileURLToPath } from "url";
 
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(bodyParser.json({ limit: "20mb" }));
+app.use(bodyParser.json());
 app.use(cors());
 
-// -----------------------------------------------------
-// 🔐 Konfiguration
-// -----------------------------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "meinGeheimesToken";
 const PORT = process.env.PORT || 10000;
-const EXCEL_URL =
-  process.env.EXCEL_URL ||
-  "https://gehlenborgsitzmoebel-my.sharepoint.com/:x:/g/personal/marlon_moebel-gehlenborg_de/EfXEyJHsUKdEj-VGjbSKCBsBAEl-6Fx5_k9LtOTyljv5ig?download=1";
-const IMPORT_INTERVAL_MS = Number(process.env.IMPORT_INTERVAL_MS || 30 * 60 * 1000); // 30 Min
 
-// PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
 // -----------------------------------------------------
-// 🔒 Auth Middleware
+// 🔐 Auth Middleware
 // -----------------------------------------------------
 const auth = (req, res, next) => {
-  const h = req.headers.authorization || "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Kein Token" });
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: "Kein Token" });
+  const token = header.split(" ")[1];
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
+    const user = jwt.verify(token, JWT_SECRET);
+    req.user = user;
     next();
-  } catch {
+  } catch (err) {
     res.status(401).json({ error: "Ungültiger Token" });
   }
 };
 
 // -----------------------------------------------------
-// 🗄️ DB Schema prüfen/erweitern
+// 🗄️ DB Schema prüfen
 // -----------------------------------------------------
 async function ensureSchema() {
   const client = await pool.connect();
@@ -89,33 +71,93 @@ async function ensureSchema() {
         hinweis TEXT,
         telefon TEXT,
         status TEXT,
-        foto_url TEXT
+        foto_url TEXT,
+        ankunft TEXT,
+        position INTEGER
       );
     `);
-
-    // 🧩 fehlende Spalten automatisch ergänzen
-    await client.query(`ALTER TABLE stopps ADD COLUMN IF NOT EXISTS ankunft TEXT;`);
-    await client.query(`ALTER TABLE stopps ADD COLUMN IF NOT EXISTS position INTEGER;`);
-    console.log("✅ Spalten 'ankunft' & 'position' überprüft/erstellt");
-
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_touren_fahrer_datum ON touren(fahrer_id, datum);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_stopps_tour_id ON stopps(tour_id);`);
-  } catch (err) {
-    console.error("⚠️ Fehler beim Schema-Check:", err.message);
+    console.log("✅ Tabellen überprüft/erstellt");
   } finally {
     client.release();
   }
 }
 
 // -----------------------------------------------------
+// 🧠 Excel-Import (lokal)
+// -----------------------------------------------------
+async function importExcel() {
+  try {
+    const filePath = path.join(__dirname, "data", "Tourenplan.xlsx");
+    if (!fs.existsSync(filePath)) throw new Error("Excel-Datei nicht gefunden!");
+
+    const workbook = XLSX.readFile(filePath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const range = sheet["!ref"].split(":")[1];
+    sheet["!ref"] = `A8:${range}`; // ab Zeile 8
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+    const client = await pool.connect();
+    await client.query("BEGIN");
+    await client.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY;");
+
+    const fahrerMap = new Map();
+
+    for (const row of rows) {
+      if (!row.Fahrer || !row.Datum || !row.Adresse) continue;
+
+      const name = row.Fahrer.trim();
+      let fahrerId = fahrerMap.get(name);
+      if (!fahrerId) {
+        const res = await client.query(
+          "INSERT INTO fahrer (name) VALUES ($1) RETURNING id;",
+          [name]
+        );
+        fahrerId = res.rows[0].id;
+        fahrerMap.set(name, fahrerId);
+      }
+
+      const tourRes = await client.query(
+        "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING id;",
+        [fahrerId, row.Datum]
+      );
+      const tourId = tourRes.rows[0].id;
+
+      await client.query(
+        `INSERT INTO stopps 
+         (tour_id, kunde, adresse, kommission, hinweis, telefon, status, ankunft, position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);`,
+        [
+          tourId,
+          row.Kunde || "",
+          row.Adresse || "",
+          row.Kommission || "",
+          row.Hinweis || "",
+          row.Telefon || "",
+          row.Status || "",
+          row.Ankunft || "",
+          row.Pos || null,
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+    client.release();
+    console.log(`📊 Excel importiert: ${rows.length} Zeilen`);
+  } catch (err) {
+    console.error("⚠️ Excel-Import Fehler:", err.message);
+  }
+}
+
+// -----------------------------------------------------
 // 🔑 Login
 // -----------------------------------------------------
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body || {};
-  const validUser = username === "Gehlenborg" && password === "Orga1023/";
-  if (!validUser) return res.status(401).json({ error: "Login fehlgeschlagen" });
-  const token = jwt.sign({ user: username }, JWT_SECRET, { expiresIn: "7d" });
-  res.json({ token });
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+  if (username === "Gehlenborg" && password === "Orga1023/") {
+    const token = jwt.sign({ user: username }, JWT_SECRET, { expiresIn: "7d" });
+    return res.json({ token });
+  }
+  res.status(401).json({ error: "Login fehlgeschlagen" });
 });
 
 // -----------------------------------------------------
@@ -127,7 +169,7 @@ app.get("/fahrer", auth, async (_, res) => {
 });
 
 // -----------------------------------------------------
-// 🚚 Touren pro Fahrer/Datum
+// 🚚 Touren
 // -----------------------------------------------------
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   const { fahrerId, datum } = req.params;
@@ -137,7 +179,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   );
   if (tour.rowCount === 0) return res.json({ tour: null, stopps: [] });
   const stopps = await pool.query(
-    "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, id) ASC;",
+    "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position,id) ASC;",
     [tour.rows[0].id]
   );
   res.json({ tour: tour.rows[0], stopps: stopps.rows });
@@ -152,38 +194,16 @@ app.get("/reset", auth, async (_, res) => {
 });
 
 // -----------------------------------------------------
-// 🗓️ Root-Info
+// 🗓️ Root
 // -----------------------------------------------------
 app.get("/", (_, res) => {
-  res.send("✅ Tourenplan API läuft – bitte Frontend unter https://tourenplan-frontend.onrender.com öffnen");
+  res.send("✅ Tourenplan Backend läuft lokal mit Excel-Import");
 });
-
-// -----------------------------------------------------
-// 🧠 Auto-Import aus Excel
-// -----------------------------------------------------
-async function runAutoImportOnce() {
-  try {
-    console.log("⏳ Starte Auto-Import von Excel...");
-    const r = await fetch(EXCEL_URL);
-    if (!r.ok) throw new Error(`Download fehlgeschlagen: HTTP ${r.status}`);
-    const buf = Buffer.from(await r.arrayBuffer());
-    const wb = XLSX.read(buf, { type: "buffer" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    if (!ws) throw new Error("Kein Sheet gefunden");
-    const range = ws["!ref"].split(":")[1];
-    ws["!ref"] = `A8:${range}`;
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    console.log(`📊 ${rows.length} Zeilen gelesen`);
-  } catch (err) {
-    console.error("⚠️ Auto-Import Fehler:", err.message);
-  }
-}
 
 // -----------------------------------------------------
 // 🚀 Start
 // -----------------------------------------------------
 ensureSchema().then(() => {
   app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
-  runAutoImportOnce();
-  setInterval(runAutoImportOnce, IMPORT_INTERVAL_MS);
+  importExcel(); // beim Start einmalig laden
 });
