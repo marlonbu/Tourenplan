@@ -1,5 +1,5 @@
-// server.js – Lokaler Excel-Import (ohne OneDrive)
-// ---------------------------------------------------------------
+// server.js – Lokaler Excel-Import mit Datumskonvertierung
+//---------------------------------------------------------------
 import express from "express";
 import bodyParser from "body-parser";
 import pg from "pg";
@@ -83,6 +83,28 @@ async function ensureSchema() {
 }
 
 // -----------------------------------------------------
+// 📅 Hilfsfunktion: Excel-Datum umwandeln
+// -----------------------------------------------------
+function excelDateToISO(value) {
+  if (!value) return null;
+
+  // Falls schon Textdatum
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!isNaN(parsed)) return parsed.toISOString().split("T")[0];
+  }
+
+  // Falls Zahl (Excel-Zeitstempel)
+  if (typeof value === "number") {
+    const base = new Date(Date.UTC(1899, 11, 30)); // Excel base date
+    const date = new Date(base.getTime() + value * 86400000);
+    return date.toISOString().split("T")[0];
+  }
+
+  return null;
+}
+
+// -----------------------------------------------------
 // 🧠 Excel-Import (lokal)
 // -----------------------------------------------------
 async function importExcel() {
@@ -105,6 +127,7 @@ async function importExcel() {
     for (const row of rows) {
       if (!row.Fahrer || !row.Datum || !row.Adresse) continue;
 
+      // Fahrer-ID
       const name = row.Fahrer.trim();
       let fahrerId = fahrerMap.get(name);
       if (!fahrerId) {
@@ -116,9 +139,13 @@ async function importExcel() {
         fahrerMap.set(name, fahrerId);
       }
 
+      // Datum umwandeln
+      const datumISO = excelDateToISO(row.Datum);
+      if (!datumISO) continue;
+
       const tourRes = await client.query(
         "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING id;",
-        [fahrerId, row.Datum]
+        [fahrerId, datumISO]
       );
       const tourId = tourRes.rows[0].id;
 
@@ -197,7 +224,7 @@ app.get("/reset", auth, async (_, res) => {
 // 🗓️ Root
 // -----------------------------------------------------
 app.get("/", (_, res) => {
-  res.send("✅ Tourenplan Backend läuft lokal mit Excel-Import");
+  res.send("✅ Tourenplan Backend läuft mit lokalem Excel-Import");
 });
 
 // -----------------------------------------------------
@@ -205,5 +232,5 @@ app.get("/", (_, res) => {
 // -----------------------------------------------------
 ensureSchema().then(() => {
   app.listen(PORT, () => console.log(`🚀 API läuft auf Port ${PORT}`));
-  importExcel(); // beim Start einmalig laden
+  importExcel(); // einmalig beim Start laden
 });
