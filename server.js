@@ -1,4 +1,4 @@
-// server.js – Lokaler Excel-Import mit Datumskonvertierung
+// server.js – Excel-Import mit Datumserkennung & Zusammenfassung
 //---------------------------------------------------------------
 import express from "express";
 import bodyParser from "body-parser";
@@ -37,10 +37,27 @@ const auth = (req, res, next) => {
     const user = jwt.verify(token, JWT_SECRET);
     req.user = user;
     next();
-  } catch (err) {
+  } catch {
     res.status(401).json({ error: "Ungültiger Token" });
   }
 };
+
+// -----------------------------------------------------
+// 📅 Hilfsfunktion: Excel-Datum umwandeln
+// -----------------------------------------------------
+function excelDateToISO(value) {
+  if (!value) return null;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!isNaN(parsed)) return parsed.toISOString().split("T")[0];
+  }
+  if (typeof value === "number") {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    const date = new Date(base.getTime() + value * 86400000);
+    return date.toISOString().split("T")[0];
+  }
+  return null;
+}
 
 // -----------------------------------------------------
 // 🗄️ DB Schema prüfen
@@ -83,29 +100,7 @@ async function ensureSchema() {
 }
 
 // -----------------------------------------------------
-// 📅 Hilfsfunktion: Excel-Datum umwandeln
-// -----------------------------------------------------
-function excelDateToISO(value) {
-  if (!value) return null;
-
-  // Falls schon Textdatum
-  if (typeof value === "string") {
-    const parsed = new Date(value);
-    if (!isNaN(parsed)) return parsed.toISOString().split("T")[0];
-  }
-
-  // Falls Zahl (Excel-Zeitstempel)
-  if (typeof value === "number") {
-    const base = new Date(Date.UTC(1899, 11, 30)); // Excel base date
-    const date = new Date(base.getTime() + value * 86400000);
-    return date.toISOString().split("T")[0];
-  }
-
-  return null;
-}
-
-// -----------------------------------------------------
-// 🧠 Excel-Import (lokal)
+// 🧠 Excel-Import (lokal, mit Datumserkennung)
 // -----------------------------------------------------
 async function importExcel() {
   try {
@@ -123,12 +118,20 @@ async function importExcel() {
     await client.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY;");
 
     const fahrerMap = new Map();
+    const tourMap = new Map();
+
+    let lastDate = null;
 
     for (const row of rows) {
-      if (!row.Fahrer || !row.Datum || !row.Adresse) continue;
+      // Datum ggf. übernehmen
+      const dateValue = row.Datum || lastDate;
+      const datumISO = excelDateToISO(dateValue);
+      if (!datumISO) continue;
+      lastDate = dateValue; // speichern für nächste Zeile
 
-      // Fahrer-ID
-      const name = row.Fahrer.trim();
+      const name = (row.Fahrer || "").trim();
+      if (!name) continue;
+
       let fahrerId = fahrerMap.get(name);
       if (!fahrerId) {
         const res = await client.query(
@@ -139,15 +142,16 @@ async function importExcel() {
         fahrerMap.set(name, fahrerId);
       }
 
-      // Datum umwandeln
-      const datumISO = excelDateToISO(row.Datum);
-      if (!datumISO) continue;
-
-      const tourRes = await client.query(
-        "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING id;",
-        [fahrerId, datumISO]
-      );
-      const tourId = tourRes.rows[0].id;
+      const tourKey = `${fahrerId}_${datumISO}`;
+      let tourId = tourMap.get(tourKey);
+      if (!tourId) {
+        const tourRes = await client.query(
+          "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING id;",
+          [fahrerId, datumISO]
+        );
+        tourId = tourRes.rows[0].id;
+        tourMap.set(tourKey, tourId);
+      }
 
       await client.query(
         `INSERT INTO stopps 
@@ -162,7 +166,7 @@ async function importExcel() {
           row.Telefon || "",
           row.Status || "",
           row.Ankunft || "",
-          row.Pos || null,
+          row["Pos."] || null,
         ]
       );
     }
@@ -224,7 +228,7 @@ app.get("/reset", auth, async (_, res) => {
 // 🗓️ Root
 // -----------------------------------------------------
 app.get("/", (_, res) => {
-  res.send("✅ Tourenplan Backend läuft mit lokalem Excel-Import");
+  res.send("✅ Tourenplan Backend läuft mit lokalem Excel-Import (Datum fortgeführt)");
 });
 
 // -----------------------------------------------------
