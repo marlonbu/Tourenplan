@@ -1,11 +1,10 @@
-// server.js – Tourenplan Backend (CRUD + Upload + Karte vorbereitet)
-// Oktober 2025
-// Neue Funktionen:
-// - Foto-Upload (POST /upload-foto)
-// - Speicherung unter /uploads, Dateiname: stopp_<id>.jpg
-// - stopps.foto_url wird automatisch aktualisiert
+// server.js – Tourenplan Backend (komplett, mit Fahrer-Initialisierung & Foto-Upload)
 //
-// Später: OneDrive-Anbindung statt /uploads
+// ✔ CRUD Touren & Stopps
+// ✔ Fahrer werden automatisch hinzugefügt (alphabetisch)
+// ✔ Foto-Upload: /upload-foto → speichert in /uploads/stopp_<id>.jpg
+// ✔ Frontend-kompatibel (React + Vite + Render)
+// Version: Oktober 2025
 
 import express from "express";
 import cors from "cors";
@@ -19,18 +18,18 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 
-// ---------- Uploads-Ordner vorbereiten ----------
+// ---------- Uploads-Ordner ----------
 const uploadDir = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 app.use("/uploads", express.static(uploadDir));
 
-// ---------- DB ----------
+// ---------- DB-Verbindung ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-// ---------- JWT ----------
+// ---------- Auth ----------
 const signToken = (payload) =>
   jwt.sign(payload, process.env.JWT_SECRET || "dev-secret", { expiresIn: "8h" });
 const authFree = new Set(["/login", "/health", "/uploads"]);
@@ -48,7 +47,7 @@ app.use((req, res, next) => {
   }
 });
 
-// ---------- Tabellen ----------
+// ---------- Tabellen anlegen ----------
 async function ensureTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
@@ -56,6 +55,7 @@ async function ensureTables() {
       name TEXT NOT NULL UNIQUE
     );
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
@@ -63,6 +63,7 @@ async function ensureTables() {
       datum DATE NOT NULL
     );
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
@@ -78,6 +79,21 @@ async function ensureTables() {
       position INTEGER
     );
   `);
+}
+
+// ---------- Fahrer-Initialisierung ----------
+async function ensureDefaultFahrer() {
+  const defaultFahrer = [
+    "Christoph Arlt",
+    "Johannes Backhaus",
+    "Hans Noll",
+    "Markus Honkomp",
+  ].sort();
+
+  for (const name of defaultFahrer) {
+    await pool.query("INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO NOTHING;", [name]);
+  }
+  console.log("✅ Fahrer hinzugefügt/überprüft:", defaultFahrer.join(", "));
 }
 
 // ---------- Auth ----------
@@ -184,9 +200,21 @@ app.post("/upload-foto", upload.single("foto"), async (req, res) => {
   }
 });
 
+// ---------- Reset ----------
+app.post("/reset", async (_, res) => {
+  await pool.query("TRUNCATE stopps, touren RESTART IDENTITY CASCADE;");
+  res.json({ ok: true });
+});
+
+// ---------- Root ----------
+app.get("/", (_, res) => {
+  res.send("✅ Tourenplan Backend läuft (CRUD + Upload + Fahrer-Init aktiv)");
+});
+
 // ---------- Start ----------
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   await ensureTables();
+  await ensureDefaultFahrer();
   console.log(`🚀 Backend läuft auf Port ${PORT}`);
 });
