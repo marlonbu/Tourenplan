@@ -2,17 +2,14 @@
 # Tourenplan Backend - Beispiel-Umgebungsvariablen
 # ===========================================================
 
-# PostgreSQL-Verbindungsstring
-# Render erstellt diese automatisch bei PostgreSQL-Diensten
-# Beispiel:
-# postgresql://USER:PASSWORD@HOST:PORT/DBNAME
+# Render fügt diese meist automatisch hinzu (Postgres-Dienst):
 DATABASE_URL=postgresql://user:password@host:5432/tourenplan
 
-# Port für den Server (Render setzt diesen automatisch auf 10000)
+# Port (auf Render 10000)
 PORT=10000
 
-# JWT-Secret für Login-Token
+# JWT-Secret für Login
 JWT_SECRET=tourenplan_secret
 
-# Node-Umgebung (optional)
+# Optional
 NODE_ENV=production
