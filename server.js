@@ -4,7 +4,6 @@ import cors from "cors";
 import pkg from "pg";
 import jwt from "jsonwebtoken";
 import multer from "multer";
-import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 
@@ -15,25 +14,20 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// PostgreSQL-Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// Auth-Key
 const JWT_SECRET = process.env.JWT_SECRET || "geheim";
-
-// Datei-Uploads (z. B. Fotos)
 const upload = multer({ dest: "uploads/" });
-
-// Port für Render
 const PORT = process.env.PORT || 10000;
 
 // =============================
 // Tabellen initialisieren
 // =============================
 async function initDB() {
+  // Fahrer
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
       id SERIAL PRIMARY KEY,
@@ -41,15 +35,17 @@ async function initDB() {
     );
   `);
 
+  // Touren
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
-      fahrer_id INTEGER REFERENCES fahrer(id) ON DELETE CASCADE,
+      fahrer_id INTEGER REFERENCES fahrer(id),
       datum DATE NOT NULL,
       UNIQUE (fahrer_id, datum)
     );
   `);
 
+  // Stopps
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
@@ -66,7 +62,29 @@ async function initDB() {
     );
   `);
 
-  console.log("✅ Tabellen überprüft/erstellt + Constraint gesetzt");
+  // ✅ Sicherstellen, dass touren → fahrer ON DELETE CASCADE verwendet
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'touren_fahrer_id_fkey'
+        AND table_name = 'touren'
+      ) THEN
+        ALTER TABLE touren DROP CONSTRAINT touren_fahrer_id_fkey;
+      END IF;
+    END $$;
+  `);
+
+  await pool.query(`
+    ALTER TABLE touren
+    ADD CONSTRAINT touren_fahrer_id_fkey
+    FOREIGN KEY (fahrer_id)
+    REFERENCES fahrer(id)
+    ON DELETE CASCADE;
+  `);
+
+  console.log("✅ Tabellen überprüft/erstellt + Cascade aktiv");
 }
 initDB();
 
@@ -82,7 +100,6 @@ app.post("/login", async (req, res) => {
   return res.status(401).json({ error: "Ungültige Zugangsdaten" });
 });
 
-// Auth-Middleware
 function auth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader)
@@ -99,8 +116,6 @@ function auth(req, res, next) {
 // =============================
 // Fahrer-Endpunkte
 // =============================
-
-// Fahrer laden
 app.get("/fahrer", auth, async (_req, res) => {
   try {
     const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
@@ -111,15 +126,16 @@ app.get("/fahrer", auth, async (_req, res) => {
   }
 });
 
-// Fahrer hinzufügen
 app.post("/fahrer", auth, async (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: "Name erforderlich" });
   try {
     const result = await pool.query(
-      "INSERT INTO fahrer (name) VALUES ($1) RETURNING *",
+      "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING *",
       [name]
     );
+    if (result.rows.length === 0)
+      return res.json({ message: "Fahrer bereits vorhanden" });
     console.log(`✅ Fahrer hinzugefügt: ${name}`);
     res.json(result.rows[0]);
   } catch (err) {
@@ -128,7 +144,6 @@ app.post("/fahrer", auth, async (req, res) => {
   }
 });
 
-// Fahrer löschen
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -142,10 +157,8 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
 });
 
 // =============================
-// Planung / Touren
+// Touren / Planung
 // =============================
-
-// Tour anlegen
 app.post("/touren", auth, async (req, res) => {
   try {
     const { fahrer_id, datum } = req.body || {};
@@ -169,7 +182,6 @@ app.post("/touren", auth, async (req, res) => {
   }
 });
 
-// Tour laden
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   try {
     const fahrerId = Number(req.params.fahrerId);
@@ -180,9 +192,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
       [fahrerId, datum]
     );
 
-    if (tour.rows.length === 0) {
-      return res.json({ tour: null, stopps: [] });
-    }
+    if (tour.rows.length === 0) return res.json({ tour: null, stopps: [] });
 
     const stopps = await pool.query(
       "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
@@ -197,14 +207,29 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
 });
 
 // =============================
-// Uploads / Fotos (vorbereitet)
+// Uploads / Fotos
 // =============================
 app.post("/upload", upload.single("foto"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Keine Datei erhalten" });
   res.json({ url: `/uploads/${req.file.filename}` });
 });
-
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+// =============================
+// ⚠️ Manuelles Reset-Feature (optional)
+// =============================
+app.delete("/reset-db", async (_req, res) => {
+  try {
+    await pool.query("DELETE FROM stopps");
+    await pool.query("DELETE FROM touren");
+    await pool.query("DELETE FROM fahrer");
+    res.json({ success: true, message: "Alle Tabellen geleert" });
+    console.log("⚠️ Datenbank komplett zurückgesetzt");
+  } catch (err) {
+    console.error("❌ Fehler beim Reset:", err);
+    res.status(500).json({ error: "Fehler beim Reset" });
+  }
+});
 
 // =============================
 // Serverstart
