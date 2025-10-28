@@ -13,6 +13,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
+// 🗄️ PostgreSQL-Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -63,6 +64,7 @@ async function initTables() {
       position TEXT
     );
   `);
+  console.log("✅ Tabellen überprüft/erstellt");
 }
 initTables();
 
@@ -80,8 +82,13 @@ app.post("/login", (req, res) => {
 
 // 👥 Fahrer abrufen
 app.get("/fahrer", auth, async (req, res) => {
-  const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
-  res.json(result.rows);
+  try {
+    const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Fehler beim Abrufen der Fahrer:", err);
+    res.status(500).json({ error: "Fehler beim Abrufen der Fahrer" });
+  }
 });
 
 // ➕ Fahrer hinzufügen
@@ -110,12 +117,10 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// ⚠️ Alle Fahrer löschen (inkl. Touren + Stopps)
+// ⚠️ Alle Fahrer löschen (inkl. Touren + Stopps, mit CASCADE)
 app.delete("/fahrer-reset", auth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM stopps");
-    await pool.query("DELETE FROM touren");
-    await pool.query("DELETE FROM fahrer");
+    await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY CASCADE;");
     res.json({ success: true, message: "Alle Fahrer inkl. Touren und Stopps gelöscht" });
   } catch (err) {
     console.error("Fehler beim Löschen aller Fahrer:", err);
@@ -125,34 +130,42 @@ app.delete("/fahrer-reset", auth, async (req, res) => {
 
 // 🚚 Tour eines Fahrers abrufen
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
-  const { fahrerId, datum } = req.params;
-  const tour = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
-    fahrerId,
-    datum,
-  ]);
+  try {
+    const { fahrerId, datum } = req.params;
+    const tour = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
+      fahrerId,
+      datum,
+    ]);
 
-  if (tour.rows.length === 0)
-    return res.json({ tour: null, stopps: [] });
+    if (tour.rows.length === 0)
+      return res.json({ tour: null, stopps: [] });
 
-  const stopps = await pool.query("SELECT * FROM stopps WHERE tour_id=$1 ORDER BY id ASC", [
-    tour.rows[0].id,
-  ]);
-  res.json({ tour: tour.rows[0], stopps: stopps.rows });
+    const stopps = await pool.query("SELECT * FROM stopps WHERE tour_id=$1 ORDER BY id ASC", [
+      tour.rows[0].id,
+    ]);
+    res.json({ tour: tour.rows[0], stopps: stopps.rows });
+  } catch (err) {
+    console.error("Fehler beim Laden der Tour:", err);
+    res.status(500).json({ error: "Fehler beim Laden der Tour" });
+  }
 });
 
 // 🧾 Wochenübersicht
 app.get("/touren-woche", auth, async (req, res) => {
-  const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
-  res.json(result.rows);
+  try {
+    const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Fehler beim Abrufen der Wochenübersicht:", err);
+    res.status(500).json({ error: "Fehler beim Abrufen der Wochenübersicht" });
+  }
 });
 
-// 🧹 Komplett-Reset
+// 🧹 Komplett-Reset aller Tabellen (Debug)
 app.post("/reset", auth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM stopps");
-    await pool.query("DELETE FROM touren");
-    await pool.query("DELETE FROM fahrer");
-    res.json({ success: true, message: "Datenbank geleert" });
+    await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY CASCADE;");
+    res.json({ success: true, message: "Datenbank vollständig geleert" });
   } catch (err) {
     console.error("Fehler beim Reset:", err);
     res.status(500).json({ error: "Fehler beim Reset der Datenbank" });
@@ -162,5 +175,5 @@ app.post("/reset", auth, async (req, res) => {
 // 🚀 Start
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`✅ Tourenplan Backend läuft auf Port ${PORT}`);
+  console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`);
 });
