@@ -268,12 +268,14 @@ app.delete("/stopps/:id", auth, async (req, res) => {
 app.get("/touren-gesamt", auth, async (req, res) => {
   try {
     const fahrerId = req.query.fahrerId ? Number(req.query.fahrerId) : null;
-    const from = req.query.from || null; // YYYY-MM-DD
-    const to = req.query.to || null;     // YYYY-MM-DD
+    const from = req.query.from && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : null;
+    const to = req.query.to && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : null;
     const kunde = req.query.kunde?.trim() || null;
 
-    const r = await pool.query(
-      `
+    // Logging, um Query-Parameter im Render-Log zu prüfen (hilfreich zur Diagnose)
+    console.log("📊 Filter:", { fahrerId, from, to, kunde });
+
+    const sql = `
       SELECT
         t.id,
         t.datum,
@@ -301,19 +303,19 @@ app.get("/touren-gesamt", auth, async (req, res) => {
         ))
       GROUP BY t.id, f.name
       ORDER BY t.datum DESC, f.name ASC;
-      `,
-      [fahrerId, from, to, kunde]
-    );
+    `;
 
-    res.json(r.rows.map(row => ({
-      id: row.id,
-      datum: row.datum,               // ISO YYYY-MM-DD
-      fahrer: { id: row.fahrer_id, name: row.fahrer_name },
-      stopp_count: Number(row.stopp_count || 0),
-      kunden: row.kunden || [],
+    const result = await pool.query(sql, [fahrerId, from, to, kunde]);
+
+    res.json(result.rows.map(r => ({
+      id: r.id,
+      datum: r.datum,
+      fahrer: { id: r.fahrer_id, name: r.fahrer_name },
+      stopp_count: Number(r.stopp_count || 0),
+      kunden: r.kunden || [],
     })));
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error("❌ Fehler /touren-gesamt:", err);
     res.status(500).json({ error: "Fehler beim Laden der Gesamtübersicht" });
   }
 });
