@@ -1,285 +1,200 @@
 import express from "express";
-import bodyParser from "body-parser";
+import pg from "pg";
 import cors from "cors";
-import pkg from "pg";
-import jwt from "jsonwebtoken";
-import multer from "multer";
 import dotenv from "dotenv";
 
 dotenv.config();
-
-const { Pool } = pkg;
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+const PORT = process.env.PORT || 10000;
 
-// 🗄️ PostgreSQL
-const pool = new Pool({
+// PostgreSQL-Verbindung
+const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// 🔐 Auth
-function auth(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Kein Token" });
-  try {
-    jwt.verify(token, process.env.JWT_SECRET || "tourenplan");
-    next();
-  } catch {
-    return res.status(403).json({ error: "Ungültiger Token" });
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// --- Middleware zur einfachen Authentifizierung ---
+const auth = (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token || token !== `Bearer ${process.env.API_TOKEN}`) {
+    return res.status(403).json({ error: "Nicht autorisiert" });
   }
-}
+  next();
+};
 
-// 🧱 Tabellen
-async function initTables() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS fahrer (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE
-    );
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS touren (
-      id SERIAL PRIMARY KEY,
-      fahrer_id INTEGER NOT NULL REFERENCES fahrer(id) ON DELETE CASCADE,
-      datum DATE NOT NULL
-    );
-  `);
-  // UNIQUE (fahrer_id, datum) nachrüsten, falls noch nicht gesetzt
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_fahrer_datum') THEN
-        ALTER TABLE touren ADD CONSTRAINT unique_fahrer_datum UNIQUE (fahrer_id, datum);
-      END IF;
-    END $$;
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS stopps (
-      id SERIAL PRIMARY KEY,
-      tour_id INTEGER NOT NULL REFERENCES touren(id) ON DELETE CASCADE,
-      kunde TEXT,
-      adresse TEXT,
-      kommission TEXT,
-      hinweis TEXT,
-      telefon TEXT,
-      status TEXT,
-      foto_url TEXT,
-      ankunft TIME,
-      position INTEGER DEFAULT 0
-    );
-  `);
-  console.log("✅ Tabellen überprüft/erstellt + Constraint gesetzt");
-}
-initTables();
-
-// 🔑 Login (ein Account wie besprochen)
-app.post("/login", (req, res) => {
-  const { username, password } = req.body;
-  if (username === "Gehlenborg" && password === "Orga1023/") {
-    const token = jwt.sign({ username }, process.env.JWT_SECRET || "tourenplan", { expiresIn: "8h" });
-    return res.json({ token });
-  }
-  return res.status(401).json({ error: "Falsche Zugangsdaten" });
-});
-
-//
-// ===== Fahrer =====
-//
-app.get("/fahrer", auth, async (_req, res) => {
+// --- Tabellen erstellen, falls nicht vorhanden ---
+(async () => {
   try {
-    const r = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
-    res.json(r.rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Abrufen der Fahrer" });
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS fahrer (
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS touren (
+        id SERIAL PRIMARY KEY,
+        fahrer_id INTEGER REFERENCES fahrer(id) ON DELETE CASCADE,
+        datum DATE NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS stopps (
+        id SERIAL PRIMARY KEY,
+        tour_id INTEGER REFERENCES touren(id) ON DELETE CASCADE,
+        kunde TEXT,
+        adresse TEXT,
+        telefon TEXT,
+        reihenfolge INTEGER,
+        erledigt BOOLEAN DEFAULT false
+      );
+    `);
+
+    // Constraint setzen, um doppelte Touren (fahrer_id + datum) zu verhindern
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'unique_fahrer_datum'
+        ) THEN
+          ALTER TABLE touren
+          ADD CONSTRAINT unique_fahrer_datum UNIQUE (fahrer_id, datum);
+        END IF;
+      END
+      $$;
+    `);
+
+    console.log("✅ Tabellen überprüft/erstellt + Constraint gesetzt");
+  } catch (err) {
+    console.error("❌ Fehler beim Tabellenerstellen:", err);
+  }
+})();
+
+// --- ROUTES ---
+
+// Fahrer abrufen
+app.get("/fahrer", auth, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
 
+// Fahrer hinzufügen
 app.post("/fahrer", auth, async (req, res) => {
   try {
     const { name } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: "Name erforderlich" });
-    const r = await pool.query(
-      "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING *",
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Name darf nicht leer sein" });
+    }
+    const result = await pool.query(
+      "INSERT INTO fahrer (name) VALUES ($1) RETURNING *",
       [name.trim()]
     );
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    if (err.code === "23505") {
+      res.status(400).json({ error: "Fahrer existiert bereits" });
+    } else {
+      res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
+    }
   }
 });
 
+// Fahrer löschen
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM fahrer WHERE id=$1", [req.params.id]);
+    const id = Number(req.params.id);
+    const result = await pool.query("DELETE FROM fahrer WHERE id=$1", [id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Fahrer nicht gefunden" });
+    }
     res.json({ success: true });
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Löschen des Fahrers" });
   }
 });
 
-// Admin-Reset (alles leer)
-app.delete("/fahrer-reset", auth, async (_req, res) => {
-  try {
-    await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY CASCADE;");
-    res.json({ success: true, message: "Alle Fahrer inkl. Touren und Stopps gelöscht" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Löschen aller Fahrer" });
-  }
-});
-
-//
-// ===== Touren & Stopps (Planung) =====
-//
-app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
-  try {
-    const fahrerId = Number(req.params.fahrerId);
-    const datum = req.params.datum;
-    const t = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [fahrerId, datum]);
-    if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
-    const s = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
-      [t.rows[0].id]
-    );
-    res.json({ tour: t.rows[0], stopps: s.rows });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Laden der Tour" });
-  }
-});
-
+// Tour anlegen
 app.post("/touren", auth, async (req, res) => {
   try {
-    const fahrerId = Number(req.body.fahrerId);
-    const datum = req.body.datum;
-    if (!fahrerId || !datum) return res.status(400).json({ error: "fahrerId und datum erforderlich" });
-
-    const r = await pool.query(
-      `INSERT INTO touren (fahrer_id, datum)
-       VALUES ($1,$2)
-       ON CONFLICT (fahrer_id, datum) DO UPDATE SET datum=EXCLUDED.datum
-       RETURNING *`,
-      [fahrerId, datum]
+    const { fahrer_id, datum } = req.body;
+    if (!fahrer_id || !datum) {
+      return res.status(400).json({ error: "Fahrer und Datum erforderlich" });
+    }
+    const result = await pool.query(
+      "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) ON CONFLICT (fahrer_id, datum) DO UPDATE SET datum = EXCLUDED.datum RETURNING *",
+      [fahrer_id, datum]
     );
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Fehler beim Anlegen der Tour" });
   }
 });
 
-app.get("/touren/:tourId/stopps", auth, async (req, res) => {
+// Alle Touren abrufen
+app.get("/touren", auth, async (req, res) => {
   try {
-    const tourId = Number(req.params.tourId);
-    if (!tourId) return res.status(400).json({ error: "Ungültige Tour-ID" });
-
-    // Prüfen, ob Tour existiert
-    const tourCheck = await pool.query("SELECT id FROM touren WHERE id=$1", [tourId]);
-    if (tourCheck.rows.length === 0)
-      return res.status(404).json({ error: "Tour nicht gefunden" });
-
-    const stopps = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
-      [tourId]
+    const result = await pool.query(
+      `SELECT t.id, t.datum, f.name AS fahrer
+       FROM touren t
+       JOIN fahrer f ON f.id = t.fahrer_id
+       ORDER BY t.datum DESC`
     );
-
-    res.json(stopps.rows || []);
-  } catch (e) {
-    console.error("❌ Fehler /touren/:tourId/stopps:", e);
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Laden der Touren" });
   }
 });
 
-app.post("/touren/:tourId/stopps", auth, async (req, res) => {
-  try {
-    const tourId = Number(req.params.tourId);
-    const {
-      kunde = "",
-      adresse = "",
-      kommission = "",
-      hinweis = "",
-      telefon = "",
-      status = "",
-      ankunft = null,
-      position = 0,
-    } = req.body;
-
-    if (!adresse?.trim() || !kunde?.trim()) return res.status(400).json({ error: "Kunde und Adresse erforderlich" });
-
-    const r = await pool.query(
-      `INSERT INTO stopps (tour_id, kunde, adresse, kommission, hinweis, telefon, status, ankunft, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *`,
-      [tourId, kunde.trim(), adresse.trim(), kommission.trim(), hinweis.trim(), telefon.trim(), status.trim(), ankunft, Number(position) || 0]
-    );
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
-  }
-});
-
-app.put("/stopps/:id", auth, async (req, res) => {
+// Tourdetails (Stopps)
+app.get("/touren/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const {
-      kunde, adresse, kommission, hinweis, telefon, status, ankunft, position,
-    } = req.body;
-
-    const r = await pool.query(
-      `UPDATE stopps
-         SET kunde = COALESCE($1, kunde),
-             adresse = COALESCE($2, adresse),
-             kommission = COALESCE($3, kommission),
-             hinweis = COALESCE($4, hinweis),
-             telefon = COALESCE($5, telefon),
-             status  = COALESCE($6, status),
-             ankunft = COALESCE($7, ankunft),
-             position= COALESCE($8, position)
-       WHERE id=$9
-       RETURNING *`,
-      [kunde, adresse, kommission, hinweis, telefon, status, ankunft, (position===''||position===null)? null : Number(position), id]
+    const result = await pool.query(
+      `SELECT s.*, t.datum, f.name AS fahrer_name
+       FROM stopps s
+       JOIN touren t ON s.tour_id = t.id
+       JOIN fahrer f ON f.id = t.fahrer_id
+       WHERE s.tour_id = $1
+       ORDER BY s.reihenfolge ASC`,
+      [id]
     );
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Aktualisieren des Stopps" });
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fehler beim Laden der Tourdetails" });
   }
 });
 
-app.delete("/stopps/:id", auth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
-    res.json({ success: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
-  }
-});
-
-//
-// ===== Gesamtübersicht =====
-//
+// --- Gesamtübersicht (mit Filtern) ---
 app.get("/touren-gesamt", auth, async (req, res) => {
   try {
     const fahrerId = req.query.fahrerId ? Number(req.query.fahrerId) : null;
-    const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "")
-      ? req.query.from
-      : null;
-    const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || "")
-      ? req.query.to
-      : null;
+    const from =
+      req.query.from && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from)
+        ? req.query.from
+        : null;
+    const to =
+      req.query.to && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to)
+        ? req.query.to
+        : null;
     const kunde = req.query.kunde?.trim() || null;
 
     console.log("📊 Filter geprüft:", { fahrerId, from, to, kunde });
 
-    const result = await pool.query(
-      `
+    const sql = `
       SELECT
         t.id,
         t.datum,
@@ -298,18 +213,19 @@ app.get("/touren-gesamt", auth, async (req, res) => {
       FROM touren t
       JOIN fahrer f ON f.id = t.fahrer_id
       LEFT JOIN stopps s ON s.tour_id = t.id
-      WHERE ($1 IS NULL OR t.fahrer_id = $1)
-        AND ($2 IS NULL OR t.datum >= CAST($2 AS DATE))
-        AND ($3 IS NULL OR t.datum <= CAST($3 AS DATE))
-        AND ($4 IS NULL OR EXISTS (
+      WHERE
+        ($1::integer IS NULL OR t.fahrer_id = $1::integer)
+        AND ($2::date IS NULL OR t.datum >= $2::date)
+        AND ($3::date IS NULL OR t.datum <= $3::date)
+        AND ($4::text IS NULL OR EXISTS (
           SELECT 1 FROM stopps sx
           WHERE sx.tour_id = t.id AND sx.kunde ILIKE ('%' || $4 || '%')
         ))
       GROUP BY t.id, f.name
       ORDER BY t.datum DESC, f.name ASC;
-      `,
-      [fahrerId, from, to, kunde]
-    );
+    `;
+
+    const result = await pool.query(sql, [fahrerId, from, to, kunde]);
 
     res.json(
       result.rows.map((r) => ({
@@ -322,32 +238,13 @@ app.get("/touren-gesamt", auth, async (req, res) => {
     );
   } catch (err) {
     console.error("❌ Fehler /touren-gesamt:", err);
-    res.status(500).json({ error: "Fehler beim Laden der Gesamtübersicht" });
+    res
+      .status(500)
+      .json({ error: "Fehler beim Laden der Gesamtübersicht", details: err });
   }
 });
 
-// 🧾 Wochenübersicht (alt, belassen)
-app.get("/touren-woche", auth, async (_req, res) => {
-  try {
-    const r = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
-    res.json(r.rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Abrufen der Wochenübersicht" });
-  }
+// --- Serverstart ---
+app.listen(PORT, () => {
+  console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`);
 });
-
-// 🧹 Komplett-Reset (Debug)
-app.post("/reset", auth, async (_req, res) => {
-  try {
-    await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY CASCADE;");
-    res.json({ success: true, message: "Datenbank vollständig geleert" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Fehler beim Reset der Datenbank" });
-  }
-});
-
-// 🚀 Start
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`));
