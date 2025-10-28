@@ -39,14 +39,27 @@ async function initTables() {
       name TEXT NOT NULL UNIQUE
     );
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
       fahrer_id INTEGER NOT NULL REFERENCES fahrer(id) ON DELETE CASCADE,
-      datum DATE NOT NULL,
-      UNIQUE (fahrer_id, datum)
+      datum DATE NOT NULL
     );
   `);
+
+  // 🔧 UNIQUE Constraint sicherstellen (fahrer_id + datum)
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'unique_fahrer_datum'
+      ) THEN
+        ALTER TABLE touren ADD CONSTRAINT unique_fahrer_datum UNIQUE (fahrer_id, datum);
+      END IF;
+    END $$;
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
@@ -62,7 +75,8 @@ async function initTables() {
       position INTEGER DEFAULT 0
     );
   `);
-  console.log("✅ Tabellen überprüft/erstellt");
+
+  console.log("✅ Tabellen überprüft/erstellt + Constraint gesetzt");
 }
 initTables();
 
