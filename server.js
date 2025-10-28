@@ -99,7 +99,7 @@ app.post("/fahrer", auth, async (req, res) => {
   }
 });
 
-// 🗑️ Fahrer löschen
+// 🗑️ Fahrer löschen (einzeln)
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -111,13 +111,25 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// Beispielroute für Touren (vereinfacht)
+// ⚠️ Alle Fahrer löschen (Admin-Reset)
+app.delete("/fahrer-reset", auth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM fahrer");
+    res.json({ success: true, message: "Alle Fahrer gelöscht" });
+  } catch (err) {
+    console.error("Fehler beim Löschen aller Fahrer:", err);
+    res.status(500).json({ error: "Fehler beim Löschen aller Fahrer" });
+  }
+});
+
+// 🚚 Tour eines Fahrers laden
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   const { fahrerId, datum } = req.params;
   const tour = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
     fahrerId,
     datum,
   ]);
+
   if (tour.rows.length === 0)
     return res.json({ tour: null, stopps: [] });
 
@@ -125,6 +137,25 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
     tour.rows[0].id,
   ]);
   res.json({ tour: tour.rows[0], stopps: stopps.rows });
+});
+
+// 🧾 Wochenübersicht (Platzhalter)
+app.get("/touren-woche", auth, async (req, res) => {
+  const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
+  res.json(result.rows);
+});
+
+// 🧹 Reset aller Tabellen (Debug)
+app.post("/reset", auth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM stopps");
+    await pool.query("DELETE FROM touren");
+    await pool.query("DELETE FROM fahrer");
+    res.json({ success: true, message: "Datenbank geleert" });
+  } catch (err) {
+    console.error("Fehler beim Reset:", err);
+    res.status(500).json({ error: "Fehler beim Reset der Datenbank" });
+  }
 });
 
 // 🚀 Server starten
