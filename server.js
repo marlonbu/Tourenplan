@@ -13,7 +13,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// 🗄️ PostgreSQL-Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -32,7 +31,7 @@ function auth(req, res, next) {
   }
 }
 
-// 🧩 Tabellen prüfen / erstellen
+// 🧱 Tabellen prüfen / erstellen
 async function initTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
@@ -44,7 +43,7 @@ async function initTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
-      fahrer_id INTEGER REFERENCES fahrer(id),
+      fahrer_id INTEGER REFERENCES fahrer(id) ON DELETE CASCADE,
       datum DATE
     );
   `);
@@ -52,7 +51,7 @@ async function initTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
-      tour_id INTEGER REFERENCES touren(id),
+      tour_id INTEGER REFERENCES touren(id) ON DELETE CASCADE,
       kunde TEXT,
       adresse TEXT,
       kommission TEXT,
@@ -67,7 +66,7 @@ async function initTables() {
 }
 initTables();
 
-// 🔑 Login (Standard)
+// 🔑 Login
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
   if (username === "Gehlenborg" && password === "Orga1023/") {
@@ -99,7 +98,7 @@ app.post("/fahrer", auth, async (req, res) => {
   }
 });
 
-// 🗑️ Fahrer löschen (einzeln)
+// 🗑️ Einzelnen Fahrer löschen
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -111,18 +110,20 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// ⚠️ Alle Fahrer löschen (Admin-Reset)
+// ⚠️ Alle Fahrer löschen (inkl. Touren + Stopps)
 app.delete("/fahrer-reset", auth, async (req, res) => {
   try {
+    await pool.query("DELETE FROM stopps");
+    await pool.query("DELETE FROM touren");
     await pool.query("DELETE FROM fahrer");
-    res.json({ success: true, message: "Alle Fahrer gelöscht" });
+    res.json({ success: true, message: "Alle Fahrer inkl. Touren und Stopps gelöscht" });
   } catch (err) {
     console.error("Fehler beim Löschen aller Fahrer:", err);
     res.status(500).json({ error: "Fehler beim Löschen aller Fahrer" });
   }
 });
 
-// 🚚 Tour eines Fahrers laden
+// 🚚 Tour eines Fahrers abrufen
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   const { fahrerId, datum } = req.params;
   const tour = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
@@ -139,13 +140,13 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   res.json({ tour: tour.rows[0], stopps: stopps.rows });
 });
 
-// 🧾 Wochenübersicht (Platzhalter)
+// 🧾 Wochenübersicht
 app.get("/touren-woche", auth, async (req, res) => {
   const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
   res.json(result.rows);
 });
 
-// 🧹 Reset aller Tabellen (Debug)
+// 🧹 Komplett-Reset
 app.post("/reset", auth, async (req, res) => {
   try {
     await pool.query("DELETE FROM stopps");
@@ -158,7 +159,7 @@ app.post("/reset", auth, async (req, res) => {
   }
 });
 
-// 🚀 Server starten
+// 🚀 Start
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✅ Tourenplan Backend läuft auf Port ${PORT}`);
