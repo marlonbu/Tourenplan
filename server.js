@@ -39,7 +39,6 @@ async function initTables() {
       name TEXT NOT NULL UNIQUE
     );
   `);
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
@@ -47,19 +46,15 @@ async function initTables() {
       datum DATE NOT NULL
     );
   `);
-
-  // 🔧 UNIQUE Constraint sicherstellen (fahrer_id + datum)
+  // UNIQUE (fahrer_id, datum) nachrüsten, falls noch nicht gesetzt
   await pool.query(`
     DO $$
     BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'unique_fahrer_datum'
-      ) THEN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_fahrer_datum') THEN
         ALTER TABLE touren ADD CONSTRAINT unique_fahrer_datum UNIQUE (fahrer_id, datum);
       END IF;
     END $$;
   `);
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
@@ -75,12 +70,11 @@ async function initTables() {
       position INTEGER DEFAULT 0
     );
   `);
-
   console.log("✅ Tabellen überprüft/erstellt + Constraint gesetzt");
 }
 initTables();
 
-// 🔑 Login (ein gemeinsamer Account wie besprochen)
+// 🔑 Login (ein Account wie besprochen)
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
   if (username === "Gehlenborg" && password === "Orga1023/") {
@@ -107,7 +101,10 @@ app.post("/fahrer", auth, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: "Name erforderlich" });
-    const r = await pool.query("INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING *", [name.trim()]);
+    const r = await pool.query(
+      "INSERT INTO fahrer (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING *",
+      [name.trim()]
+    );
     res.json(r.rows[0]);
   } catch (e) {
     console.error(e);
@@ -139,15 +136,16 @@ app.delete("/fahrer-reset", auth, async (_req, res) => {
 //
 // ===== Touren & Stopps (Planung) =====
 //
-
-// Tour abrufen (bestehender Endpunkt)
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   try {
-    const { fahrerId, datum } = req.params; // datum: YYYY-MM-DD
+    const fahrerId = Number(req.params.fahrerId);
+    const datum = req.params.datum;
     const t = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [fahrerId, datum]);
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
-
-    const s = await pool.query("SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC", [t.rows[0].id]);
+    const s = await pool.query(
+      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
+      [t.rows[0].id]
+    );
     res.json({ tour: t.rows[0], stopps: s.rows });
   } catch (e) {
     console.error(e);
@@ -155,14 +153,17 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   }
 });
 
-// Tour anlegen (oder bestehende zurückgeben)
 app.post("/touren", auth, async (req, res) => {
   try {
-    const { fahrerId, datum } = req.body; // datum: YYYY-MM-DD
+    const fahrerId = Number(req.body.fahrerId);
+    const datum = req.body.datum;
     if (!fahrerId || !datum) return res.status(400).json({ error: "fahrerId und datum erforderlich" });
 
     const r = await pool.query(
-      "INSERT INTO touren (fahrer_id, datum) VALUES ($1,$2) ON CONFLICT (fahrer_id, datum) DO UPDATE SET datum=EXCLUDED.datum RETURNING *",
+      `INSERT INTO touren (fahrer_id, datum)
+       VALUES ($1,$2)
+       ON CONFLICT (fahrer_id, datum) DO UPDATE SET datum=EXCLUDED.datum
+       RETURNING *`,
       [fahrerId, datum]
     );
     res.json(r.rows[0]);
@@ -172,10 +173,12 @@ app.post("/touren", auth, async (req, res) => {
   }
 });
 
-// Stopps einer Tour abrufen
 app.get("/touren/:tourId/stopps", auth, async (req, res) => {
   try {
-    const r = await pool.query("SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC", [req.params.tourId]);
+    const r = await pool.query(
+      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
+      [req.params.tourId]
+    );
     res.json(r.rows);
   } catch (e) {
     console.error(e);
@@ -183,10 +186,9 @@ app.get("/touren/:tourId/stopps", auth, async (req, res) => {
   }
 });
 
-// Stopp hinzufügen
 app.post("/touren/:tourId/stopps", auth, async (req, res) => {
   try {
-    const tourId = req.params.tourId;
+    const tourId = Number(req.params.tourId);
     const {
       kunde = "",
       adresse = "",
@@ -204,7 +206,7 @@ app.post("/touren/:tourId/stopps", auth, async (req, res) => {
       `INSERT INTO stopps (tour_id, kunde, adresse, kommission, hinweis, telefon, status, ankunft, position)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING *`,
-      [tourId, kunde.trim(), adresse.trim(), kommission.trim(), hinweis.trim(), telefon.trim(), status.trim(), ankunft, position ?? 0]
+      [tourId, kunde.trim(), adresse.trim(), kommission.trim(), hinweis.trim(), telefon.trim(), status.trim(), ankunft, Number(position) || 0]
     );
     res.json(r.rows[0]);
   } catch (e) {
@@ -213,10 +215,9 @@ app.post("/touren/:tourId/stopps", auth, async (req, res) => {
   }
 });
 
-// Stopp bearbeiten
 app.put("/stopps/:id", auth, async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
     const {
       kunde, adresse, kommission, hinweis, telefon, status, ankunft, position,
     } = req.body;
@@ -233,7 +234,7 @@ app.put("/stopps/:id", auth, async (req, res) => {
              position= COALESCE($8, position)
        WHERE id=$9
        RETURNING *`,
-      [kunde, adresse, kommission, hinweis, telefon, status, ankunft, position, id]
+      [kunde, adresse, kommission, hinweis, telefon, status, ankunft, (position===''||position===null)? null : Number(position), id]
     );
     res.json(r.rows[0]);
   } catch (e) {
@@ -242,7 +243,6 @@ app.put("/stopps/:id", auth, async (req, res) => {
   }
 });
 
-// Stopp löschen
 app.delete("/stopps/:id", auth, async (req, res) => {
   try {
     await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
@@ -254,8 +254,62 @@ app.delete("/stopps/:id", auth, async (req, res) => {
 });
 
 //
-// ===== Wochenübersicht / Reset (bleibt) =====
+// ===== Gesamtübersicht =====
 //
+app.get("/touren-gesamt", auth, async (req, res) => {
+  try {
+    const fahrerId = req.query.fahrerId ? Number(req.query.fahrerId) : null;
+    const from = req.query.from || null; // YYYY-MM-DD
+    const to = req.query.to || null;     // YYYY-MM-DD
+    const kunde = req.query.kunde?.trim() || null;
+
+    const r = await pool.query(
+      `
+      SELECT
+        t.id,
+        t.datum,
+        t.fahrer_id,
+        f.name AS fahrer_name,
+        COUNT(s.id) AS stopp_count,
+        COALESCE((
+          SELECT ARRAY(
+            SELECT DISTINCT s2.kunde
+            FROM stopps s2
+            WHERE s2.tour_id = t.id AND s2.kunde IS NOT NULL
+            ORDER BY s2.kunde
+            LIMIT 10
+          )
+        ), '{}') AS kunden
+      FROM touren t
+      JOIN fahrer f ON f.id = t.fahrer_id
+      LEFT JOIN stopps s ON s.tour_id = t.id
+      WHERE ($1::int IS NULL OR t.fahrer_id = $1)
+        AND ($2::date IS NULL OR t.datum >= $2)
+        AND ($3::date IS NULL OR t.datum <= $3)
+        AND ($4::text IS NULL OR EXISTS (
+          SELECT 1 FROM stopps sx
+          WHERE sx.tour_id = t.id AND sx.kunde ILIKE ('%' || $4 || '%')
+        ))
+      GROUP BY t.id, f.name
+      ORDER BY t.datum DESC, f.name ASC;
+      `,
+      [fahrerId, from, to, kunde]
+    );
+
+    res.json(r.rows.map(row => ({
+      id: row.id,
+      datum: row.datum,               // ISO YYYY-MM-DD
+      fahrer: { id: row.fahrer_id, name: row.fahrer_name },
+      stopp_count: Number(row.stopp_count || 0),
+      kunden: row.kunden || [],
+    })));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Fehler beim Laden der Gesamtübersicht" });
+  }
+});
+
+// 🧾 Wochenübersicht (alt, belassen)
 app.get("/touren-woche", auth, async (_req, res) => {
   try {
     const r = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
@@ -266,6 +320,7 @@ app.get("/touren-woche", auth, async (_req, res) => {
   }
 });
 
+// 🧹 Komplett-Reset (Debug)
 app.post("/reset", auth, async (_req, res) => {
   try {
     await pool.query("TRUNCATE stopps, touren, fahrer RESTART IDENTITY CASCADE;");
