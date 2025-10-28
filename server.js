@@ -268,14 +268,18 @@ app.delete("/stopps/:id", auth, async (req, res) => {
 app.get("/touren-gesamt", auth, async (req, res) => {
   try {
     const fahrerId = req.query.fahrerId ? Number(req.query.fahrerId) : null;
-    const from = req.query.from && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : null;
-    const to = req.query.to && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : null;
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "")
+      ? req.query.from
+      : null;
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || "")
+      ? req.query.to
+      : null;
     const kunde = req.query.kunde?.trim() || null;
 
-    // Logging, um Query-Parameter im Render-Log zu prüfen (hilfreich zur Diagnose)
-    console.log("📊 Filter:", { fahrerId, from, to, kunde });
+    console.log("📊 Filter geprüft:", { fahrerId, from, to, kunde });
 
-    const sql = `
+    const result = await pool.query(
+      `
       SELECT
         t.id,
         t.datum,
@@ -294,26 +298,28 @@ app.get("/touren-gesamt", auth, async (req, res) => {
       FROM touren t
       JOIN fahrer f ON f.id = t.fahrer_id
       LEFT JOIN stopps s ON s.tour_id = t.id
-      WHERE ($1::int IS NULL OR t.fahrer_id = $1)
-        AND ($2::date IS NULL OR t.datum >= $2)
-        AND ($3::date IS NULL OR t.datum <= $3)
-        AND ($4::text IS NULL OR EXISTS (
+      WHERE ($1 IS NULL OR t.fahrer_id = $1)
+        AND ($2 IS NULL OR t.datum >= CAST($2 AS DATE))
+        AND ($3 IS NULL OR t.datum <= CAST($3 AS DATE))
+        AND ($4 IS NULL OR EXISTS (
           SELECT 1 FROM stopps sx
           WHERE sx.tour_id = t.id AND sx.kunde ILIKE ('%' || $4 || '%')
         ))
       GROUP BY t.id, f.name
       ORDER BY t.datum DESC, f.name ASC;
-    `;
+      `,
+      [fahrerId, from, to, kunde]
+    );
 
-    const result = await pool.query(sql, [fahrerId, from, to, kunde]);
-
-    res.json(result.rows.map(r => ({
-      id: r.id,
-      datum: r.datum,
-      fahrer: { id: r.fahrer_id, name: r.fahrer_name },
-      stopp_count: Number(r.stopp_count || 0),
-      kunden: r.kunden || [],
-    })));
+    res.json(
+      result.rows.map((r) => ({
+        id: r.id,
+        datum: r.datum,
+        fahrer: { id: r.fahrer_id, name: r.fahrer_name },
+        stopp_count: Number(r.stopp_count || 0),
+        kunden: r.kunden || [],
+      }))
+    );
   } catch (err) {
     console.error("❌ Fehler /touren-gesamt:", err);
     res.status(500).json({ error: "Fehler beim Laden der Gesamtübersicht" });
