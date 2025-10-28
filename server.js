@@ -122,19 +122,6 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-/// ⚠️ TEMPORÄR: ALLE FAHRER + TOURDATEN LÖSCHEN (manuell aufrufbar)
-app.delete("/fahrer", async (_req, res) => {
-  try {
-    await pool.query("DELETE FROM touren");
-    await pool.query("DELETE FROM fahrer");
-    console.log("⚠️ Alle Fahrer und Touren aus der Datenbank gelöscht!");
-    res.json({ success: true, message: "Alle Fahrer inkl. Touren gelöscht" });
-  } catch (err) {
-    console.error("❌ Fehler beim Löschen aller Fahrer:", err);
-    res.status(500).json({ error: "Fehler beim Löschen aller Fahrer" });
-  }
-});
-
 // =========================
 // ===== TOUREN ROUTEN =====
 // =========================
