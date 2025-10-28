@@ -175,13 +175,22 @@ app.post("/touren", auth, async (req, res) => {
 
 app.get("/touren/:tourId/stopps", auth, async (req, res) => {
   try {
-    const r = await pool.query(
+    const tourId = Number(req.params.tourId);
+    if (!tourId) return res.status(400).json({ error: "Ungültige Tour-ID" });
+
+    // Prüfen, ob Tour existiert
+    const tourCheck = await pool.query("SELECT id FROM touren WHERE id=$1", [tourId]);
+    if (tourCheck.rows.length === 0)
+      return res.status(404).json({ error: "Tour nicht gefunden" });
+
+    const stopps = await pool.query(
       "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
-      [req.params.tourId]
+      [tourId]
     );
-    res.json(r.rows);
+
+    res.json(stopps.rows || []);
   } catch (e) {
-    console.error(e);
+    console.error("❌ Fehler /touren/:tourId/stopps:", e);
     res.status(500).json({ error: "Fehler beim Laden der Stopps" });
   }
 });
