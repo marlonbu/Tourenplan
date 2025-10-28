@@ -1,109 +1,94 @@
+// =========================
+// Tourenplan Backend Server
+// =========================
+
 import express from "express";
-import pkg from "pg";
 import cors from "cors";
+import pkg from "pg";
 import dotenv from "dotenv";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 
 dotenv.config();
+const { Pool } = pkg;
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
+// ===== MIDDLEWARE =====
 app.use(cors());
 app.use(express.json());
 
-const { Pool } = pkg;
+// ===== POSTGRES VERBINDUNG =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+  ssl: { rejectUnauthorized: false },
 });
 
-const PORT = process.env.PORT || 10000;
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
-
-// ======== Auth Middleware ========
+// ===== EINFACHE AUTH =====
+// Akzeptiert jeden Token (z. B. "Bearer Gehlenborg")
 function auth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "Kein Token" });
+  const header = req.headers["authorization"];
+  if (!header) return res.status(401).json({ error: "Kein Token vorhanden" });
+
   const token = header.split(" ")[1];
-  try {
-    jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
+  if (!token || token.trim() === "") {
     return res.status(401).json({ error: "Ungültiger Token" });
   }
+
+  req.user = { name: token };
+  next();
 }
 
-// ======== Initialisierung Tabellen ========
-async function initTables() {
+// ===== TABELLEN ANLEGEN =====
+async function initDB() {
   try {
-    // Fahrer
     await pool.query(`
       CREATE TABLE IF NOT EXISTS fahrer (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL
+        name TEXT UNIQUE NOT NULL
       );
     `);
 
-    // Touren
     await pool.query(`
       CREATE TABLE IF NOT EXISTS touren (
         id SERIAL PRIMARY KEY,
         fahrer_id INTEGER REFERENCES fahrer(id) ON DELETE CASCADE,
-        datum DATE NOT NULL
+        datum DATE NOT NULL,
+        stopps JSONB DEFAULT '[]'
       );
     `);
-
-    // Stopps
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS stopps (
-        id SERIAL PRIMARY KEY,
-        tour_id INTEGER REFERENCES touren(id) ON DELETE CASCADE,
-        kunde TEXT,
-        adresse TEXT,
-        telefon TEXT,
-        position INTEGER,
-        hinweis TEXT
-      );
-    `);
-
-    // Fahrer automatisch einfügen, wenn leer
-    const existing = await pool.query("SELECT COUNT(*) FROM fahrer");
-    if (parseInt(existing.rows[0].count) === 0) {
-      await pool.query(`
-        INSERT INTO fahrer (name) VALUES
-        ('Christoph Arlt'),
-        ('Johannes Backhaus'),
-        ('Hans Noll'),
-        ('Markus Honkomp');
-      `);
-      console.log("✅ Fahrer automatisch hinzugefügt");
-    }
 
     console.log("✅ Tabellen überprüft/erstellt");
   } catch (err) {
-    console.error("❌ Fehler bei Tabelleninitialisierung:", err);
+    console.error("❌ Fehler beim Initialisieren der DB:", err);
   }
 }
+initDB();
 
-// ===== Login =====
+// =========================
+// ===== LOGIN (FAKE) ======
+// =========================
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
+
+  // Simpler Login für interne Nutzung
   if (username === "Gehlenborg" && password === "Orga1023/") {
-    const token = jwt.sign({ user: username }, JWT_SECRET, { expiresIn: "7d" });
-    return res.json({ token });
+    return res.json({ token: "Gehlenborg" });
   }
-  res.status(401).json({ error: "Login fehlgeschlagen" });
+
+  return res.status(401).json({ error: "Ungültige Zugangsdaten" });
 });
 
-// ===== Fahrer =====
+// =========================
+// ===== FAHRER ROUTEN =====
+// =========================
 
 // Alle Fahrer abrufen
 app.get("/fahrer", auth, async (_req, res) => {
   try {
-    const r = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
-    res.json(r.rows);
-  } catch (e) {
-    console.error("Fehler beim Laden der Fahrer:", e);
+    const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Fehler beim Laden der Fahrer:", err);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
@@ -112,6 +97,7 @@ app.get("/fahrer", auth, async (_req, res) => {
 app.post("/fahrer", auth, async (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: "Name erforderlich" });
+
   try {
     const result = await pool.query(
       "INSERT INTO fahrer (name) VALUES ($1) RETURNING *",
@@ -119,7 +105,7 @@ app.post("/fahrer", auth, async (req, res) => {
     );
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("Fehler beim Hinzufügen:", err);
+    console.error("❌ Fehler beim Hinzufügen:", err);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
   }
 });
@@ -127,69 +113,51 @@ app.post("/fahrer", auth, async (req, res) => {
 // Fahrer löschen
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM fahrer WHERE id = $1", [req.params.id]);
+    const id = parseInt(req.params.id);
+    await pool.query("DELETE FROM fahrer WHERE id = $1", [id]);
     res.json({ success: true });
   } catch (err) {
-    console.error("Fehler beim Löschen des Fahrers:", err);
-    res.status(500).json({ error: "Fehler beim Löschen des Fahrers" });
+    console.error("❌ Fehler beim Löschen des Fahrers:", err);
+    res.status(500).json({ error: "Fehler beim Löschen" });
   }
 });
 
-// ===== Touren =====
+// =========================
+// ===== TOUREN ROUTEN =====
+// =========================
 
-// Tour anlegen
+// Touren abrufen
+app.get("/touren", auth, async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Fehler beim Laden der Touren:", err);
+    res.status(500).json({ error: "Fehler beim Laden der Touren" });
+  }
+});
+
+// Tour hinzufügen
 app.post("/touren", auth, async (req, res) => {
-  const { fahrerId, datum } = req.body;
-  if (!fahrerId || !datum) return res.status(400).json({ error: "Daten fehlen" });
+  const { fahrer_id, datum, stopps } = req.body;
+  if (!fahrer_id || !datum)
+    return res.status(400).json({ error: "Fahrer und Datum erforderlich" });
 
   try {
     const result = await pool.query(
-      `INSERT INTO touren (fahrer_id, datum)
-       VALUES ($1, $2)
-       ON CONFLICT DO NOTHING
-       RETURNING *`,
-      [fahrerId, datum]
+      "INSERT INTO touren (fahrer_id, datum, stopps) VALUES ($1, $2, $3) RETURNING *",
+      [fahrer_id, datum, stopps || []]
     );
-    res.json(result.rows[0] || {});
+    res.json(result.rows[0]);
   } catch (err) {
-    console.error("Fehler beim Anlegen der Tour:", err);
+    console.error("❌ Fehler beim Anlegen der Tour:", err);
     res.status(500).json({ error: "Fehler beim Anlegen der Tour" });
   }
 });
 
-// Stopps einer Tour abrufen
-app.get("/touren/:id/stopps", auth, async (req, res) => {
-  try {
-    const r = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id = $1 ORDER BY position ASC",
-      [req.params.id]
-    );
-    res.json(r.rows);
-  } catch (err) {
-    console.error("Fehler beim Laden der Stopps:", err);
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
-  }
-});
-
-// Stopp hinzufügen
-app.post("/stopps", auth, async (req, res) => {
-  const { tourId, kunde, adresse, telefon, position, hinweis } = req.body;
-  try {
-    const result = await pool.query(
-      `INSERT INTO stopps (tour_id, kunde, adresse, telefon, position, hinweis)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [tourId, kunde, adresse, telefon, position, hinweis]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("Fehler beim Hinzufügen des Stopps:", err);
-    res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
-  }
-});
-
-// Server starten
-app.listen(PORT, async () => {
-  await initTables();
-  console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`);
-});
+// =========================
+// ===== SERVER START ======
+// =========================
+app.listen(PORT, () =>
+  console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`)
+);
