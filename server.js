@@ -208,23 +208,37 @@ app.post("/touren", auth, async (req, res) => {
   }
 });
 
-// Laden (inkl. Stopps)
+// Tour laden (mit besserer Datum-Erkennung)
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   try {
     const fahrerId = Number(req.params.fahrerId);
-    const datum = req.params.datum;
+    let datum = req.params.datum;
 
-    const tour = await pool.query(
+    // Normalisierung: falls im Frontend DD.MM.YYYY, konvertieren wir
+    if (datum.includes(".")) {
+      const [d, m, y] = datum.split(".");
+      datum = `${y}-${m}-${d}`;
+    }
+
+    console.log("🔍 Lade Tour:", { fahrerId, datum });
+
+    const tourResult = await pool.query(
       "SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
       [fahrerId, datum]
     );
-    if (tour.rows.length === 0) return res.json({ tour: null, stopps: [] });
 
-    const stopps = await pool.query(
+    if (tourResult.rows.length === 0) {
+      console.log("ℹ️ Keine Tour gefunden.");
+      return res.json({ tour: null, stopps: [] });
+    }
+
+    const tour = tourResult.rows[0];
+    const stoppsResult = await pool.query(
       "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
-      [tour.rows[0].id]
+      [tour.id]
     );
-    res.json({ tour: tour.rows[0], stopps: stopps.rows });
+
+    res.json({ tour, stopps: stoppsResult.rows });
   } catch (e) {
     console.error("❌ Fehler beim Laden der Tour:", e);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
