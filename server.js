@@ -13,14 +13,18 @@ app.use(cors());
 app.use(express.json());
 app.use(bodyParser.json());
 
-// ---- DB ----------------------------------------------------
+// ============================================================
+// Datenbankverbindung
+// ============================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
+// ============================================================
+// Tabellen anlegen / prüfen
+// ============================================================
 async function initDB() {
-  // Fahrer
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
       id SERIAL PRIMARY KEY,
@@ -28,7 +32,6 @@ async function initDB() {
     );
   `);
 
-  // Touren
   await pool.query(`
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
@@ -38,7 +41,6 @@ async function initDB() {
     );
   `);
 
-  // Stopps (separate Tabelle, optional genutzt)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps (
       id SERIAL PRIMARY KEY,
@@ -55,7 +57,7 @@ async function initDB() {
     );
   `);
 
-  // Sicherstellen: touren.fahrer_id → ON DELETE CASCADE
+  // Sicherstellen, dass FK auf Fahrer CASCADE löscht
   await pool.query(`
     DO $$
     BEGIN
@@ -77,26 +79,22 @@ async function initDB() {
 
   console.log("✅ Tabellen überprüft/erstellt + Cascade aktiv");
 }
-initDB().catch((e) => {
-  console.error("❌ initDB Fehler:", e);
-});
+initDB().catch((e) => console.error("❌ initDB Fehler:", e));
 
-// ---- Auth --------------------------------------------------
+// ============================================================
+// Authentifizierung
+// ============================================================
 const JWT_SECRET = process.env.JWT_SECRET || "orga_secret";
 
 function auth(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    console.warn("⚠️ Kein Authorization-Header");
-    return res.status(401).json({ error: "Kein Token" });
-  }
-  const token = authHeader.split(" ")[1];
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: "Kein Token" });
+  const token = header.split(" ")[1];
   try {
     jwt.verify(token, JWT_SECRET);
-    return next();
-  } catch (e) {
-    console.warn("⚠️ Ungültiger Token:", e?.message);
-    return res.status(401).json({ error: "Ungültiger Token" });
+    next();
+  } catch {
+    res.status(401).json({ error: "Ungültiger Token" });
   }
 }
 
@@ -109,7 +107,11 @@ app.post("/login", async (req, res) => {
   return res.status(401).json({ error: "Ungültige Anmeldedaten" });
 });
 
-// ---- Fahrer ------------------------------------------------
+// ============================================================
+// Fahrer-Routen
+// ============================================================
+
+// Alle Fahrer
 app.get("/fahrer", auth, async (_req, res) => {
   try {
     const r = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
@@ -120,6 +122,7 @@ app.get("/fahrer", auth, async (_req, res) => {
   }
 });
 
+// Fahrer hinzufügen
 app.post("/fahrer", auth, async (req, res) => {
   try {
     const { name } = req.body || {};
@@ -138,6 +141,7 @@ app.post("/fahrer", auth, async (req, res) => {
   }
 });
 
+// Fahrer löschen
 app.delete("/fahrer/:id", auth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -150,16 +154,14 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// 👉 Seed-Route zum schnellen Wiederbefüllen (auth-pflichtig)
+// Mehrere Fahrer hinzufügen (Seed)
 app.post("/fahrer/seed", auth, async (req, res) => {
   try {
     const { namen } = req.body || {};
-    const list = Array.isArray(namen) ? namen : [];
-    if (list.length === 0) {
+    if (!Array.isArray(namen) || namen.length === 0)
       return res.status(400).json({ error: "namen: [] erforderlich" });
-    }
 
-    const values = list.map((n) => `('${n.replace(/'/g, "''")}')`).join(",");
+    const values = namen.map((n) => `('${n.replace(/'/g, "''")}')`).join(",");
     const sql =
       "INSERT INTO fahrer (name) VALUES " +
       values +
@@ -173,48 +175,50 @@ app.post("/fahrer/seed", auth, async (req, res) => {
   }
 });
 
-// ---- Touren ------------------------------------------------
-// Anlegen/Upsert
+// ============================================================
+// Touren-Routen
+// ============================================================
+
+// Tour anlegen oder aktualisieren
 app.post("/touren", auth, async (req, res) => {
   try {
     const { fahrer_id, datum } = req.body || {};
     if (!fahrer_id || !datum)
       return res.status(400).json({ error: "Fahrer und Datum erforderlich" });
 
-    // Existiert?
     const exists = await pool.query(
       "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
       [Number(fahrer_id), datum]
     );
 
-    let r;
+    let result;
     if (exists.rows.length > 0) {
-      r = await pool.query(
-        "UPDATE touren SET datum=$2::date WHERE fahrer_id=$1 AND datum=$2::date RETURNING *",
+      result = await pool.query(
+        "UPDATE touren SET datum=$2::date WHERE fahrer_id=$1 RETURNING *",
         [Number(fahrer_id), datum]
       );
     } else {
-      r = await pool.query(
+      result = await pool.query(
         "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2::date) RETURNING *",
         [Number(fahrer_id), datum]
       );
     }
 
-    console.log("📅 Tour bereitgestellt:", r.rows[0]);
-    res.json(r.rows[0]);
+    console.log("📅 Tour bereitgestellt:", result.rows[0]);
+    res.json(result.rows[0]);
   } catch (e) {
     console.error("❌ Fehler beim Anlegen der Tour:", e);
     res.status(500).json({ error: "Fehler beim Anlegen der Tour" });
   }
 });
 
-// Tour laden (mit besserer Datum-Erkennung)
+// Tour laden mit Datumsnormalisierung
 app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   try {
     const fahrerId = Number(req.params.fahrerId);
     let datum = req.params.datum;
 
-    // Normalisierung: falls im Frontend DD.MM.YYYY, konvertieren wir
+    // Normalisierung
     if (datum.includes(".")) {
       const [d, m, y] = datum.split(".");
       datum = `${y}-${m}-${d}`;
@@ -245,6 +249,22 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   }
 });
 
-// ---- Start -------------------------------------------------
+// ============================================================
+// DEBUG: Zeigt alle Touren in der Datenbank
+// ============================================================
+app.get("/touren-debug", async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM touren ORDER BY datum DESC");
+    console.log("📋 Aktuelle Touren in DB:", result.rows);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("❌ Fehler /touren-debug:", err);
+    res.status(500).json({ error: "Fehler bei touren-debug" });
+  }
+});
+
+// ============================================================
+// Start
+// ============================================================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`));
