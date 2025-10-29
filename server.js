@@ -36,7 +36,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS touren (
       id SERIAL PRIMARY KEY,
       fahrer_id INTEGER NOT NULL REFERENCES fahrer(id),
-      datum DATE NOT NULL,
+      datum TIMESTAMPTZ NOT NULL,
       UNIQUE (fahrer_id, datum)
     );
   `);
@@ -154,27 +154,6 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// Mehrere Fahrer hinzufügen (Seed)
-app.post("/fahrer/seed", auth, async (req, res) => {
-  try {
-    const { namen } = req.body || {};
-    if (!Array.isArray(namen) || namen.length === 0)
-      return res.status(400).json({ error: "namen: [] erforderlich" });
-
-    const values = namen.map((n) => `('${n.replace(/'/g, "''")}')`).join(",");
-    const sql =
-      "INSERT INTO fahrer (name) VALUES " +
-      values +
-      " ON CONFLICT (name) DO NOTHING RETURNING *";
-    const r = await pool.query(sql);
-    console.log(`✅ Fahrer-Seed: ${r.rows.length} neu hinzugefügt`);
-    res.json({ added: r.rows.length, rows: r.rows });
-  } catch (e) {
-    console.error("❌ Seed-Fehler:", e);
-    res.status(500).json({ error: "Fehler beim Seed" });
-  }
-});
-
 // ============================================================
 // Touren-Routen
 // ============================================================
@@ -187,19 +166,19 @@ app.post("/touren", auth, async (req, res) => {
       return res.status(400).json({ error: "Fahrer und Datum erforderlich" });
 
     const exists = await pool.query(
-      "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
+      "SELECT id FROM touren WHERE fahrer_id=$1 AND datum::date=$2::date",
       [Number(fahrer_id), datum]
     );
 
     let result;
     if (exists.rows.length > 0) {
       result = await pool.query(
-        "UPDATE touren SET datum=$2::date WHERE fahrer_id=$1 RETURNING *",
+        "UPDATE touren SET datum=$2::timestamptz WHERE fahrer_id=$1 RETURNING *",
         [Number(fahrer_id), datum]
       );
     } else {
       result = await pool.query(
-        "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2::date) RETURNING *",
+        "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2::timestamptz) RETURNING *",
         [Number(fahrer_id), datum]
       );
     }
@@ -227,7 +206,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
     console.log("🔍 Lade Tour:", { fahrerId, datum });
 
     const tourResult = await pool.query(
-      "SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
+      "SELECT * FROM touren WHERE fahrer_id=$1 AND datum::date=$2::date",
       [fahrerId, datum]
     );
 
