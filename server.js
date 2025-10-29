@@ -4,6 +4,9 @@ import pkg from "pg";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import bodyParser from "body-parser";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -12,6 +15,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(bodyParser.json());
+
+// ============================================================
+// Upload-Ordner vorbereiten & statisch ausliefern
+// ============================================================
+const UPLOAD_DIR = "uploads";
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+app.use("/uploads", express.static(UPLOAD_DIR));
+
+// Multer-Setup (lokale Speicherung, später OneDrive möglich)
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const stoppId = req.params.stoppId || "unknown";
+    const ext = path.extname(file.originalname || ".jpg").toLowerCase() || ".jpg";
+    const ts = Date.now();
+    cb(null, `stopp_${stoppId}_${ts}${ext}`);
+  },
+});
+const upload = multer({ storage });
 
 // ============================================================
 // Datenbankverbindung
@@ -250,7 +274,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
 });
 
 // ============================================================
-// Stopps-Routen (CRUD für eine Tour)
+// Stopps-Routen (CRUD + Foto-Upload)
 // ============================================================
 
 // Stopp hinzufügen
@@ -292,6 +316,15 @@ app.post("/stopps/:tourId", auth, async (req, res) => {
 app.delete("/stopps/:stoppId", auth, async (req, res) => {
   try {
     const stoppId = Number(req.params.stoppId);
+
+    // ggf. altes Foto löschen
+    const old = await pool.query("SELECT foto_url FROM stopps WHERE id=$1", [stoppId]);
+    const oldUrl = old.rows?.[0]?.foto_url;
+    if (oldUrl && oldUrl.startsWith("/uploads/")) {
+      const p = path.join(".", oldUrl);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+
     await pool.query("DELETE FROM stopps WHERE id=$1", [stoppId]);
     console.log("🗑️ Stopp gelöscht:", stoppId);
     res.json({ success: true });
@@ -301,7 +334,7 @@ app.delete("/stopps/:stoppId", auth, async (req, res) => {
   }
 });
 
-// Stopp bearbeiten (optional)
+// Stopp bearbeiten
 app.put("/stopps/:stoppId", auth, async (req, res) => {
   try {
     const stoppId = Number(req.params.stoppId);
@@ -330,6 +363,56 @@ app.put("/stopps/:stoppId", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ Fehler beim Bearbeiten des Stopps:", e);
     res.status(500).json({ error: "Fehler beim Bearbeiten des Stopps" });
+  }
+});
+
+// Foto hochladen
+app.post("/stopps/:stoppId/foto", auth, upload.single("foto"), async (req, res) => {
+  try {
+    const stoppId = Number(req.params.stoppId);
+    if (!req.file) return res.status(400).json({ error: "Datei fehlt (Form-Feldname: foto)" });
+
+    const url = `/uploads/${req.file.filename}`;
+
+    // altes Foto – falls vorhanden – löschen
+    const old = await pool.query("SELECT foto_url FROM stopps WHERE id=$1", [stoppId]);
+    const oldUrl = old.rows?.[0]?.foto_url;
+    if (oldUrl && oldUrl.startsWith("/uploads/")) {
+      const p = path.join(".", oldUrl);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+
+    const r = await pool.query(
+      "UPDATE stopps SET foto_url=$2 WHERE id=$1 RETURNING *",
+      [stoppId, url]
+    );
+
+    console.log("📷 Foto gespeichert:", r.rows[0]?.foto_url);
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ Fehler beim Foto-Upload:", e);
+    res.status(500).json({ error: "Fehler beim Foto-Upload" });
+  }
+});
+
+// Foto löschen
+app.delete("/stopps/:stoppId/foto", auth, async (req, res) => {
+  try {
+    const stoppId = Number(req.params.stoppId);
+    const r1 = await pool.query("SELECT foto_url FROM stopps WHERE id=$1", [stoppId]);
+    const url = r1.rows?.[0]?.foto_url;
+
+    if (url && url.startsWith("/uploads/")) {
+      const p = path.join(".", url);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+
+    const r2 = await pool.query("UPDATE stopps SET foto_url=NULL WHERE id=$1 RETURNING *", [stoppId]);
+    console.log("🗑️ Foto entfernt:", stoppId);
+    res.json(r2.rows[0]);
+  } catch (e) {
+    console.error("❌ Fehler beim Foto-Löschen:", e);
+    res.status(500).json({ error: "Fehler beim Foto-Löschen" });
   }
 });
 
