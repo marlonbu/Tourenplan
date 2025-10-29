@@ -11,13 +11,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🧠 PostgreSQL-Verbindung
+// PostgreSQL-Verbindung
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
-// 🔐 Auth-Middleware
+// Authentifizierung
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Kein Token" });
@@ -29,7 +29,7 @@ const auth = (req, res, next) => {
   }
 };
 
-// 🧩 Tabellen-Erstellung mit ON DELETE CASCADE
+// Tabellen prüfen/erstellen
 (async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
@@ -47,7 +47,7 @@ const auth = (req, res, next) => {
   console.log("✅ Tabellen überprüft/erstellt + Cascade aktiv");
 })();
 
-// ===== LOGIN =====
+// LOGIN
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (username === "Gehlenborg" && password === "Orga1023/") {
@@ -92,30 +92,38 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
-// ===== ALLE Fahrer löschen (Admin Reset)
-app.delete("/fahrer", auth, async (_req, res) => {
-  try {
-    await pool.query("DELETE FROM fahrer");
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Fehler beim Löschen aller Fahrer:", err);
-    res.status(500).json({ error: "Fehler beim Löschen aller Fahrer" });
-  }
-});
-
 // ===== TOUREN =====
+
+// Tour anlegen oder überschreiben
 app.post("/touren", auth, async (req, res) => {
   try {
-    const { fahrer_id, datum, stopps = [] } = req.body;
-
+    let { fahrer_id, datum, stopps } = req.body;
     if (!fahrer_id || !datum) {
       return res.status(400).json({ error: "Fahrer und Datum erforderlich" });
     }
+    if (!stopps) stopps = [];
 
-    const result = await pool.query(
-      "INSERT INTO touren (fahrer_id, datum, stopps) VALUES ($1, $2::date, $3::jsonb) RETURNING *",
-      [fahrer_id, datum, JSON.stringify(stopps)]
+    // Prüfen, ob Tour bereits existiert
+    const existing = await pool.query(
+      "SELECT id FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
+      [fahrer_id, datum]
     );
+
+    let result;
+    if (existing.rows.length > 0) {
+      // Bereits vorhanden → Update
+      result = await pool.query(
+        "UPDATE touren SET stopps=$3::jsonb WHERE fahrer_id=$1 AND datum=$2::date RETURNING *",
+        [fahrer_id, datum, JSON.stringify(stopps)]
+      );
+    } else {
+      // Neu anlegen
+      result = await pool.query(
+        "INSERT INTO touren (fahrer_id, datum, stopps) VALUES ($1, $2::date, $3::jsonb) RETURNING *",
+        [fahrer_id, datum, JSON.stringify(stopps)]
+      );
+    }
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error("❌ Fehler beim Anlegen der Tour:", err);
@@ -123,6 +131,7 @@ app.post("/touren", auth, async (req, res) => {
   }
 });
 
+// Tour laden
 app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
   try {
     const { fahrer_id, datum } = req.params;
@@ -130,14 +139,18 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
       "SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2::date",
       [fahrer_id, datum]
     );
-    res.json(result.rows);
+    if (result.rows.length === 0)
+      return res.json({ tour: null, stopps: [] });
+
+    const tour = result.rows[0];
+    res.json({ tour, stopps: tour.stopps || [] });
   } catch (err) {
     console.error("❌ Fehler beim Laden der Tour:", err);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
   }
 });
 
-// ===== TOUR-LISTE (Gesamtübersicht)
+// Gesamtübersicht (optional)
 app.post("/touren-gesamt", auth, async (req, res) => {
   try {
     const { fahrerId, from, to } = req.body;
@@ -166,6 +179,6 @@ app.post("/touren-gesamt", auth, async (req, res) => {
   }
 });
 
-// ===== START
+// Server starten
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Tourenplan Backend läuft auf Port ${PORT}`));
