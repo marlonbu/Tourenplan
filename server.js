@@ -50,10 +50,10 @@ async function initDB() {
       kommission TEXT,
       hinweis TEXT,
       telefon TEXT,
-      status TEXT,
+      status TEXT DEFAULT 'offen',
       foto_url TEXT,
       ankunft TEXT,
-      position INTEGER
+      position INTEGER DEFAULT 0
     );
   `);
 
@@ -154,6 +154,27 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
   }
 });
 
+// Optional: mehrere Fahrer hinzufügen (Seed)
+app.post("/fahrer/seed", auth, async (req, res) => {
+  try {
+    const { namen } = req.body || {};
+    if (!Array.isArray(namen) || namen.length === 0)
+      return res.status(400).json({ error: "namen: [] erforderlich" });
+
+    const values = namen.map((n) => `('${n.replace(/'/g, "''")}')`).join(",");
+    const sql =
+      "INSERT INTO fahrer (name) VALUES " +
+      values +
+      " ON CONFLICT (name) DO NOTHING RETURNING *";
+    const r = await pool.query(sql);
+    console.log(`✅ Fahrer-Seed: ${r.rows.length} neu hinzugefügt`);
+    res.json({ added: r.rows.length, rows: r.rows });
+  } catch (e) {
+    console.error("❌ Seed-Fehler:", e);
+    res.status(500).json({ error: "Fehler beim Seed" });
+  }
+});
+
 // ============================================================
 // Touren-Routen
 // ============================================================
@@ -197,7 +218,7 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
     const fahrerId = Number(req.params.fahrerId);
     let datum = req.params.datum;
 
-    // Normalisierung
+    // Normalisierung: DD.MM.YYYY -> YYYY-MM-DD
     if (datum.includes(".")) {
       const [d, m, y] = datum.split(".");
       datum = `${y}-${m}-${d}`;
@@ -225,6 +246,90 @@ app.get("/touren/:fahrerId/:datum", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ Fehler beim Laden der Tour:", e);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
+  }
+});
+
+// ============================================================
+// Stopps-Routen (CRUD für eine Tour)
+// ============================================================
+
+// Stopp hinzufügen
+app.post("/stopps/:tourId", auth, async (req, res) => {
+  try {
+    const tourId = Number(req.params.tourId);
+    const {
+      kunde = "",
+      adresse = "",
+      kommission = "",
+      hinweis = "",
+      telefon = "",
+      status = "offen",
+      foto_url = "",
+      ankunft = "",
+      position = 0,
+    } = req.body || {};
+
+    if (!tourId) return res.status(400).json({ error: "tourId erforderlich" });
+    if (!kunde || !adresse) return res.status(400).json({ error: "Kunde & Adresse erforderlich" });
+
+    const r = await pool.query(
+      `INSERT INTO stopps
+       (tour_id, kunde, adresse, kommission, hinweis, telefon, status, foto_url, ankunft, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *`,
+      [tourId, kunde, adresse, kommission, hinweis, telefon, status, foto_url, ankunft, position ?? 0]
+    );
+
+    console.log("➕ Stopp hinzugefügt:", r.rows[0]);
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ Fehler beim Hinzufügen des Stopps:", e);
+    res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
+  }
+});
+
+// Stopp löschen
+app.delete("/stopps/:stoppId", auth, async (req, res) => {
+  try {
+    const stoppId = Number(req.params.stoppId);
+    await pool.query("DELETE FROM stopps WHERE id=$1", [stoppId]);
+    console.log("🗑️ Stopp gelöscht:", stoppId);
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ Fehler beim Löschen des Stopps:", e);
+    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
+  }
+});
+
+// Stopp bearbeiten (optional)
+app.put("/stopps/:stoppId", auth, async (req, res) => {
+  try {
+    const stoppId = Number(req.params.stoppId);
+    const {
+      kunde, adresse, kommission, hinweis, telefon,
+      status, foto_url, ankunft, position
+    } = req.body || {};
+
+    const r = await pool.query(
+      `UPDATE stopps
+       SET kunde = COALESCE($2, kunde),
+           adresse = COALESCE($3, adresse),
+           kommission = COALESCE($4, kommission),
+           hinweis = COALESCE($5, hinweis),
+           telefon = COALESCE($6, telefon),
+           status = COALESCE($7, status),
+           foto_url = COALESCE($8, foto_url),
+           ankunft = COALESCE($9, ankunft),
+           position = COALESCE($10, position)
+       WHERE id=$1
+       RETURNING *`,
+      [stoppId, kunde, adresse, kommission, hinweis, telefon, status, foto_url, ankunft, position]
+    );
+
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ Fehler beim Bearbeiten des Stopps:", e);
+    res.status(500).json({ error: "Fehler beim Bearbeiten des Stopps" });
   }
 });
 
