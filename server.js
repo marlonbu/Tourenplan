@@ -1,35 +1,39 @@
 import express from "express";
 import cors from "cors";
+import pg from "pg";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-import pg from "pg";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 const app = express();
 const port = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
+
+// 📁 Upload-Ordner bereitstellen
+if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
 app.use("/uploads", express.static("uploads"));
 
+// Multer-Konfiguration (für spätere OneDrive-Integration vorbereitet)
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, "uploads/"),
+  filename: (_req, file, cb) => {
+    const safeName = file.originalname.replace(/\s+/g, "_");
+    cb(null, `${Date.now()}-${safeName}`);
+  },
+});
+const upload = multer({ storage });
+
+// DB-Verbindung
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// 📁 Uploads-Ordner vorbereiten
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-
-// Multer-Konfiguration (lokal)
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) =>
-    cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
-});
-const upload = multer({ storage });
-
-// Middleware Auth
+// Auth-Middleware
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.replace("Bearer ", "");
   if (!token || token !== "Gehlenborg") {
@@ -38,7 +42,7 @@ const auth = (req, res, next) => {
   next();
 };
 
-// Tabellen prüfen
+// Tabellen erzeugen
 (async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fahrer (
@@ -67,11 +71,11 @@ const auth = (req, res, next) => {
       foto_url TEXT
     );
   `);
-  console.log("✅ Tabellen geprüft/erstellt");
+  console.log("✅ Tabellen geprüft/erstellt + Cascade aktiv");
 })();
 
 // ========== FAHRER ==========
-app.get("/fahrer", auth, async (_, res) => {
+app.get("/fahrer", auth, async (_req, res) => {
   const result = await pool.query("SELECT * FROM fahrer ORDER BY name ASC");
   res.json(result.rows);
 });
@@ -96,11 +100,11 @@ app.post("/touren", auth, async (req, res) => {
   const { fahrer_id, datum } = req.body;
   if (!fahrer_id || !datum)
     return res.status(400).json({ error: "Fahrer & Datum erforderlich" });
-  const r = await pool.query(
+  const result = await pool.query(
     "INSERT INTO touren (fahrer_id, datum) VALUES ($1, $2) RETURNING *",
     [fahrer_id, datum]
   );
-  res.json(r.rows[0]);
+  res.json(result.rows[0]);
 });
 
 app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
@@ -135,45 +139,57 @@ app.delete("/stopps/:id", auth, async (req, res) => {
   res.json({ success: true });
 });
 
-// ========== FOTO-UPLOAD ==========
+// ========== 📸 FOTO-UPLOAD ==========
 app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
-  const stoppId = req.params.id;
-  const file = req.file;
+  try {
+    const stoppId = req.params.id;
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "Keine Datei erhalten" });
 
-  if (!file)
-    return res.status(400).json({ error: "Keine Datei erhalten" });
+    // 🔄 Später hier OneDrive-Upload einfügen:
+    // const onedriveUrl = await uploadToOneDrive(file);
 
-  // 🔄 später OneDrive-Upload hier einsetzen
-  // Beispiel:
-  // const onedriveUrl = await uploadToOneDrive(file);
+    const localUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
+    const result = await pool.query(
+      "UPDATE stopps SET foto_url=$1 WHERE id=$2 RETURNING *",
+      [localUrl, stoppId]
+    );
 
-  const localUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: "Stopp nicht gefunden" });
 
-  const result = await pool.query(
-    "UPDATE stopps SET foto_url=$1 WHERE id=$2 RETURNING *",
-    [localUrl, stoppId]
-  );
-  res.json(result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ Fehler beim Foto-Upload:", err);
+    res.status(500).json({ error: "Fehler beim Foto-Upload" });
+  }
 });
 
-// ========== FOTO-LÖSCHEN ==========
+// ========== 📸 FOTO-LÖSCHEN ==========
 app.delete("/stopps/:id/foto", auth, async (req, res) => {
-  const stoppId = req.params.id;
-  const r = await pool.query(
-    "SELECT foto_url FROM stopps WHERE id=$1",
-    [stoppId]
-  );
-  const fotoUrl = r.rows[0]?.foto_url;
-  if (fotoUrl) {
-    const filename = path.basename(fotoUrl);
-    const filePath = path.join("uploads", filename);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  try {
+    const stoppId = req.params.id;
+    const cur = await pool.query("SELECT foto_url FROM stopps WHERE id=$1", [stoppId]);
+    const url = cur.rows[0]?.foto_url;
+
+    if (url) {
+      const filename = path.basename(url);
+      const filePath = path.join("uploads", filename);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+
+    const result = await pool.query(
+      "UPDATE stopps SET foto_url=NULL WHERE id=$1 RETURNING *",
+      [stoppId]
+    );
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: "Stopp nicht gefunden" });
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("❌ Fehler beim Foto-Löschen:", err);
+    res.status(500).json({ error: "Fehler beim Foto-Löschen" });
   }
-  const result = await pool.query(
-    "UPDATE stopps SET foto_url=NULL WHERE id=$1 RETURNING *",
-    [stoppId]
-  );
-  res.json(result.rows[0]);
 });
 
 app.listen(port, () =>
