@@ -1,5 +1,5 @@
 // server.js — Express + PostgreSQL + stabile JWT-Auth (optional deaktivierbar)
-// + Legacy-Kompatibilität: optionaler Dev-Token "Gehlenborg" (ALLOW_DEV_TOKEN)
+// + Foto-Upload lokal, + Legacy-Schalter, + PATCH /stopps/:id/anmerkung
 // Node ≥ 18, ESM aktiv
 
 import express from "express";
@@ -42,23 +42,19 @@ const pool = new pg.Pool({
 // --------- Auth (JWT + optional deaktivierbar + Legacy-Token) ----------
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-render";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-// Legacy-Token standardmäßig erlaubt, zum harten Umschalten auf reines JWT setze ALLOW_DEV_TOKEN=false
 const ALLOW_DEV_TOKEN = process.env.ALLOW_DEV_TOKEN !== "false";
 
 const auth = (req, res, next) => {
-  // Debug/CI-Modus: Auth abschalten
   if (process.env.DISABLE_AUTH === "true") return next();
 
   const header = req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : null;
 
-  // --- Legacy-Kompatibilität: früherer Dev-Token "Gehlenborg"
   if (ALLOW_DEV_TOKEN && (header === "Gehlenborg" || bearer === "Gehlenborg")) {
     req.user = { sub: "Gehlenborg", name: "Gehlenborg", role: "legacy" };
     return next();
   }
 
-  // --- Regulär: JWT erwartet
   if (!bearer) return res.status(401).json({ error: "Kein Token" });
 
   try {
@@ -70,8 +66,7 @@ const auth = (req, res, next) => {
   }
 };
 
-// DEV‑Login ersetzt früheren festen Token:
-// POST /login -> { token }
+// DEV-Login: POST /login -> { token }
 app.post("/login", (req, res) => {
   const { username, password } = req.body || {};
   const ok = username === "Gehlenborg" && password === "Orga1023/";
@@ -111,21 +106,21 @@ app.post("/login", (req, res) => {
       foto_url TEXT
     );
   `);
-  console.log("✅ Tabellen bereit");
-})().catch((e) => console.error("❌ DB‑Init Fehler:", e));
+  // ➕ neue Spalte für Fahrer-Anmerkung (falls noch nicht vorhanden)
+  await pool.query(`
+    ALTER TABLE stopps
+    ADD COLUMN IF NOT EXISTS anmerkung_fahrer TEXT DEFAULT NULL;
+  `);
+  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer)");
+})().catch((e) => console.error("❌ DB-Init Fehler:", e));
 
 // --------- Debug/Service ----------
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString() })
-);
+app.get("/health", (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-// Zeigt, ob ein Authorization‑Header vorhanden ist und ob der JWT gültig ist
 app.get("/whoami", (req, res) => {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
-  const isLegacyDevToken =
-    header === "Gehlenborg" || token === "Gehlenborg";
+  const isLegacyDevToken = header === "Gehlenborg" || token === "Gehlenborg";
 
   let decoded = null;
   let validJwt = false;
@@ -169,10 +164,7 @@ app.post("/fahrer", auth, async (req, res) => {
   const { name } = req.body || {};
   if (!name) return res.status(400).json({ error: "Name erforderlich" });
   try {
-    const r = await pool.query(
-      "INSERT INTO fahrer (name) VALUES ($1) RETURNING *",
-      [name]
-    );
+    const r = await pool.query("INSERT INTO fahrer (name) VALUES ($1) RETURNING *", [name]);
     res.json(r.rows[0]);
   } catch (e) {
     console.error("Fehler /fahrer POST:", e);
@@ -213,10 +205,10 @@ app.post("/touren", auth, async (req, res) => {
 app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
   try {
     const { fahrer_id, datum } = req.params;
-    const t = await pool.query(
-      "SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2",
-      [fahrer_id, datum]
-    );
+    const t = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
+      fahrer_id,
+      datum,
+    ]);
 
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
 
@@ -277,10 +269,10 @@ app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
     if (!file) return res.status(400).json({ error: "Kein Foto empfangen" });
 
     const publicUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
-    const r = await pool.query(
-      "UPDATE stopps SET foto_url=$1 WHERE id=$2 RETURNING *",
-      [publicUrl, stoppId]
-    );
+    const r = await pool.query("UPDATE stopps SET foto_url=$1 WHERE id=$2 RETURNING *", [
+      publicUrl,
+      stoppId,
+    ]);
 
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
@@ -316,6 +308,23 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
   } catch (e) {
     console.error("Fehler /stopps/:id/foto DELETE:", e);
     res.status(500).json({ error: "Fehler beim Foto-Löschen" });
+  }
+});
+
+// ➕ NEU: Fahrer-Anmerkung speichern
+app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
+  const { id } = req.params;
+  const { anmerkung_fahrer } = req.body || {};
+  try {
+    const r = await pool.query(
+      "UPDATE stopps SET anmerkung_fahrer=$1 WHERE id=$2 RETURNING *",
+      [anmerkung_fahrer ?? null, id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("Fehler /stopps/:id/anmerkung PATCH:", e);
+    res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
   }
 });
 
