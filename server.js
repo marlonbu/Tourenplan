@@ -282,14 +282,26 @@ app.get("/touren-admin", auth, async (req, res) => {
 
 // Stopps einer Tour
 app.get("/touren/:id/stopps", auth, async (req, res) => {
+  const { id } = req.params;
   try {
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json({ error: "Ungültige Tour-ID" });
+    }
+
+    const tourCheck = await pool.query("SELECT id FROM touren WHERE id=$1", [id]);
+    if (tourCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Tour nicht gefunden" });
+    }
+
     const r = await pool.query(
       "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC NULLS LAST, id ASC",
-      [req.params.id]
+      [id]
     );
+
     res.json(r.rows);
   } catch (e) {
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
+    console.error("❌ Fehler beim Laden der Stopps:", e.message, e.stack);
+    res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
   }
 });
 
