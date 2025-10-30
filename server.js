@@ -1,6 +1,8 @@
 // server.js — Express + PostgreSQL + stabile JWT-Auth (optional deaktivierbar)
-// + Foto-Upload lokal, + Legacy-Schalter, + PATCH /stopps/:id/anmerkung
-// + NEU: GET /touren-uebersicht (Filter: fahrer_id, datum, kw, kunde)
+// + Foto-Upload lokal, + Legacy-Schalter
+// + PATCH /stopps/:id/anmerkung (Anmerkung Fahrer)
+// + GET /touren-uebersicht (bleibt)
+// + NEU: GET /stopps-uebersicht (Flat-View je Stopp, Filter + Sortierung asc)
 // Node ≥ 18, ESM aktiv
 
 import express from "express";
@@ -15,7 +17,6 @@ import path from "path";
 dotenv.config();
 
 const app = express();
-// Hinweis: Auf Render den PORT nicht manuell setzen; Render übergibt ihn.
 const port = process.env.PORT || 10000;
 
 app.use(cors());
@@ -108,7 +109,6 @@ app.post("/login", (req, res) => {
       foto_url TEXT
     );
   `);
-  // ➕ neue Spalte für Fahrer-Anmerkung (falls noch nicht vorhanden)
   await pool.query(`
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS anmerkung_fahrer TEXT DEFAULT NULL;
@@ -211,7 +211,6 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
       fahrer_id,
       datum,
     ]);
-
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
 
     const tour = t.rows[0];
@@ -313,7 +312,7 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
   }
 });
 
-// ➕ NEU: Fahrer-Anmerkung speichern
+// ➕ Anmerkung Fahrer speichern
 app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
   const { id } = req.params;
   const { anmerkung_fahrer } = req.body || {};
@@ -331,35 +330,25 @@ app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
 });
 
 // ============================================================
-// ========== NEU: ÜBERSICHT =================================
+// ========== ÜBERSICHT (Touren, bleibt) ======================
 // ============================================================
-
-// Hilfsfunktion: ISO-Woche "YYYY-Www" -> {start, end} (Montag..Sonntag)
 function isoWeekToRange(kwStr) {
-  // kwStr z. B. "2025-W44"
   const m = /^(\d{4})-W(\d{2})$/.exec(kwStr || "");
   if (!m) return null;
   const year = Number(m[1]);
   const week = Number(m[2]);
-  // Algorithmus: Donnerstag der Woche 1 = 4. Jan
   const jan4 = new Date(Date.UTC(year, 0, 4));
-  const jan4Day = jan4.getUTCDay() || 7; // 1..7 (Mo..So)
+  const jan4Day = jan4.getUTCDay() || 7;
   const mondayOfWeek1 = new Date(jan4);
   mondayOfWeek1.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
-
   const monday = new Date(mondayOfWeek1);
-  monday.setUTCDate(mondayOfWeek1.getUTCDate() + (week - 1) * 7); // Montag der gesuchten Woche
-
+  monday.setUTCDate(mondayOfWeek1.getUTCDate() + (week - 1) * 7);
   const sunday = new Date(monday);
   sunday.setUTCDate(monday.getUTCDate() + 6);
-
-  // Als YYYY-MM-DD
-  const toIso = (d) =>
-    d.toISOString().slice(0, 10);
+  const toIso = (d) => d.toISOString().slice(0, 10);
   return { start: toIso(monday), end: toIso(sunday) };
 }
 
-// GET /touren-uebersicht?fahrer_id=&datum=YYYY-MM-DD&kw=YYYY-Www&kunde=abc
 app.get("/touren-uebersicht", auth, async (req, res) => {
   try {
     const { fahrer_id, datum, kw, kunde } = req.query;
@@ -387,7 +376,6 @@ app.get("/touren-uebersicht", auth, async (req, res) => {
     }
 
     if (kunde) {
-      // Nur Touren, die mind. einen Stopp mit passendem Kunden enthalten
       where.push(`EXISTS (
         SELECT 1 FROM stopps s2
         WHERE s2.tour_id = t.id AND s2.kunde ILIKE $${p++}
@@ -397,7 +385,6 @@ app.get("/touren-uebersicht", auth, async (req, res) => {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    // Kunden-Vorschau (max. 3) nach Position sortiert
     const sql = `
       SELECT
         t.id,
@@ -427,6 +414,79 @@ app.get("/touren-uebersicht", auth, async (req, res) => {
   } catch (e) {
     console.error("Fehler /touren-uebersicht GET:", e);
     res.status(500).json({ error: "Fehler beim Laden der Übersicht" });
+  }
+});
+
+// ============================================================
+// ========== NEU: STOPPS-ÜBERSICHT (Flat-View) ===============
+// ============================================================
+// GET /stopps-uebersicht?fahrer_id=&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&kw=YYYY-Www&kunde=
+app.get("/stopps-uebersicht", auth, async (req, res) => {
+  try {
+    const { fahrer_id, date_from, date_to, kw, kunde } = req.query;
+
+    const where = [];
+    const params = [];
+    let p = 1;
+
+    if (fahrer_id) {
+      where.push(`t.fahrer_id = $${p++}`);
+      params.push(fahrer_id);
+    }
+
+    if (date_from) {
+      where.push(`t.datum >= $${p++}`);
+      params.push(date_from);
+    }
+
+    if (date_to) {
+      where.push(`t.datum <= $${p++}`);
+      params.push(date_to);
+    }
+
+    if (kw && !date_from && !date_to) {
+      const range = isoWeekToRange(kw);
+      if (range) {
+        where.push(`t.datum BETWEEN $${p++} AND $${p++}`);
+        params.push(range.start, range.end);
+      }
+    }
+
+    if (kunde) {
+      where.push(`s.kunde ILIKE $${p++}`);
+      params.push(`%${kunde}%`);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const sql = `
+      SELECT
+        s.id AS stopp_id,
+        t.id AS tour_id,
+        t.datum,
+        f.id AS fahrer_id,
+        f.name AS fahrer_name,
+        s.position,
+        s.kunde,
+        s.adresse,
+        s.telefon,
+        s.kommission,
+        s.hinweis,
+        s.anmerkung_fahrer,
+        t.bemerkung AS tour_bemerkung
+      FROM stopps s
+      JOIN touren t ON t.id = s.tour_id
+      JOIN fahrer f ON f.id = t.fahrer_id
+      ${whereSql}
+      ORDER BY t.datum ASC, f.name ASC, s.position ASC NULLS LAST, s.id ASC
+      LIMIT 5000
+    `;
+
+    const r = await pool.query(sql, params);
+    res.json(r.rows);
+  } catch (e) {
+    console.error("Fehler /stopps-uebersicht GET:", e);
+    res.status(500).json({ error: "Fehler beim Laden der Stopps-Übersicht" });
   }
 });
 
