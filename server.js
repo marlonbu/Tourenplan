@@ -1,4 +1,5 @@
 // server.js — Express + PostgreSQL + stabile JWT-Auth (optional deaktivierbar)
+// + Legacy-Kompatibilität: optionaler Dev-Token "Gehlenborg" (ALLOW_DEV_TOKEN)
 // Node ≥ 18, ESM aktiv
 
 import express from "express";
@@ -38,28 +39,38 @@ const pool = new pg.Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// --------- Auth (JWT + optional deaktivierbar) ----------
+// --------- Auth (JWT + optional deaktivierbar + Legacy-Token) ----------
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-render";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+// Legacy-Token standardmäßig erlaubt, zum harten Umschalten auf reines JWT setze ALLOW_DEV_TOKEN=false
+const ALLOW_DEV_TOKEN = process.env.ALLOW_DEV_TOKEN !== "false";
 
 const auth = (req, res, next) => {
   // Debug/CI-Modus: Auth abschalten
   if (process.env.DISABLE_AUTH === "true") return next();
 
   const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Kein Token" });
+  const bearer = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  // --- Legacy-Kompatibilität: früherer Dev-Token "Gehlenborg"
+  if (ALLOW_DEV_TOKEN && (header === "Gehlenborg" || bearer === "Gehlenborg")) {
+    req.user = { sub: "Gehlenborg", name: "Gehlenborg", role: "legacy" };
+    return next();
+  }
+
+  // --- Regulär: JWT erwartet
+  if (!bearer) return res.status(401).json({ error: "Kein Token" });
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(bearer, JWT_SECRET);
     req.user = payload;
     return next();
-  } catch (_e) {
+  } catch {
     return res.status(401).json({ error: "Ungültiger oder abgelaufener Token" });
   }
 };
 
-// DEV‑Login ersetzt früheren "Gehlenborg"-Token:
+// DEV‑Login ersetzt früheren festen Token:
 // POST /login -> { token }
 app.post("/login", (req, res) => {
   const { username, password } = req.body || {};
@@ -104,12 +115,18 @@ app.post("/login", (req, res) => {
 })().catch((e) => console.error("❌ DB‑Init Fehler:", e));
 
 // --------- Debug/Service ----------
-app.get("/health", (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get("/health", (_req, res) =>
+  res.json({ ok: true, time: new Date().toISOString() })
+);
 
 // Zeigt, ob ein Authorization‑Header vorhanden ist und ob der JWT gültig ist
 app.get("/whoami", (req, res) => {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  const isLegacyDevToken =
+    header === "Gehlenborg" || token === "Gehlenborg";
+
   let decoded = null;
   let validJwt = false;
   if (token) {
@@ -120,12 +137,17 @@ app.get("/whoami", (req, res) => {
       validJwt = false;
     }
   }
+
   res.json({
     authDisabled: process.env.DISABLE_AUTH === "true",
+    allowDevToken: ALLOW_DEV_TOKEN,
     hasAuthHeader: Boolean(header),
+    isLegacyDevToken,
     validJwt,
     user: decoded
       ? { sub: decoded.sub, name: decoded.name, role: decoded.role, exp: decoded.exp }
+      : isLegacyDevToken
+      ? { sub: "Gehlenborg", name: "Gehlenborg", role: "legacy" }
       : null,
   });
 });
@@ -191,10 +213,10 @@ app.post("/touren", auth, async (req, res) => {
 app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
   try {
     const { fahrer_id, datum } = req.params;
-    const t = await pool.query("SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2", [
-      fahrer_id,
-      datum,
-    ]);
+    const t = await pool.query(
+      "SELECT * FROM touren WHERE fahrer_id=$1 AND datum=$2",
+      [fahrer_id, datum]
+    );
 
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
 
