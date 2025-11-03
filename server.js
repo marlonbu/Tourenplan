@@ -147,6 +147,114 @@ app.get("/whoami", (req, res) => {
 });
 
 // ============================================================
+// ========== STOPPS (A-Ganz nach oben gezogen!) ==============
+// ============================================================
+
+// A) Stopps einer Tour – **MUSS vor /touren/:fahrer_id/:datum stehen**
+app.get("/touren/:id/stopps", auth, async (req, res) => {
+  try {
+    const idStr = (req.params.id || "").trim();
+    const id = Number(idStr);
+    if (!idStr || !Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Ungültige Tour-ID" });
+    }
+
+    const tour = await pool.query("SELECT id FROM touren WHERE id=$1", [id]);
+    if (tour.rows.length === 0) {
+      return res.status(404).json({ error: "Tour nicht gefunden" });
+    }
+
+    const r = await pool.query(
+      "SELECT * FROM stopps s WHERE s.tour_id=$1 ORDER BY COALESCE(s.position, 2147483647) ASC, s.id ASC",
+      [id]
+    );
+    return res.json(r.rows);
+  } catch (e) {
+    console.error("❌ /touren/:id/stopps GET:", e.message);
+    return res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
+  }
+});
+
+// B) Stopp anlegen
+app.post("/stopps/:tour_id", auth, async (req, res) => {
+  const { tour_id } = req.params;
+  const {
+    kunde = null,
+    adresse = null,
+    telefon = null,
+    kommission = null,
+    hinweis = null,
+    position = null,
+  } = req.body || {};
+
+  try {
+    const r = await pool.query(
+      `INSERT INTO stopps (tour_id, kunde, adresse, telefon, kommission, hinweis, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [tour_id, kunde, adresse, telefon, kommission, hinweis, position]
+    );
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ /stopps/:tour_id POST:", e.message);
+    res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
+  }
+});
+
+// C) Stopp bearbeiten (alle Felder)
+app.patch("/stopps/:id", auth, async (req, res) => {
+  try {
+    const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
+    const sets = [];
+    const params = [];
+    let p = 1;
+    if (kunde !== undefined) { sets.push(`kunde=$${p++}`); params.push(kunde); }
+    if (adresse !== undefined) { sets.push(`adresse=$${p++}`); params.push(adresse); }
+    if (telefon !== undefined) { sets.push(`telefon=$${p++}`); params.push(telefon); }
+    if (kommission !== undefined) { sets.push(`kommission=$${p++}`); params.push(kommission); }
+    if (hinweis !== undefined) { sets.push(`hinweis=$${p++}`); params.push(hinweis); }
+    if (position !== undefined) { sets.push(`position=$${p++}`); params.push(position); }
+    if (anmerkung_fahrer !== undefined) { sets.push(`anmerkung_fahrer=$${p++}`); params.push(anmerkung_fahrer); }
+    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
+
+    params.push(req.params.id);
+    const sql = `UPDATE stopps SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
+    const r = await pool.query(sql, params);
+    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ /stopps/:id PATCH:", e.message);
+    res.status(500).json({ error: "Fehler beim Aktualisieren des Stopps" });
+  }
+});
+
+// D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
+app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
+  try {
+    const { anmerkung_fahrer } = req.body || {};
+    const r = await pool.query(
+      "UPDATE stopps SET anmerkung_fahrer=$1 WHERE id=$2 RETURNING *",
+      [anmerkung_fahrer ?? null, req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ /stopps/:id/anmerkung PATCH:", e.message);
+    res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
+  }
+});
+
+// E) Stopp löschen
+app.delete("/stopps/:id", auth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /stopps/:id DELETE:", e.message);
+    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
+  }
+});
+
+// ============================================================
 // ========== FAHRER ==========================================
 // ============================================================
 app.get("/fahrer", auth, async (_req, res) => {
@@ -278,119 +386,6 @@ app.get("/touren-admin", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ /touren-admin GET:", e.message);
     res.status(500).json({ error: "Fehler beim Laden der Touren (Admin)" });
-  }
-});
-
-// ============================================================
-// ========== STOPPS ==========================================
-// ============================================================
-
-// A) Stopps einer Tour – robust & mit Klartext-Fehlern
-app.get("/touren/:id/stopps", auth, async (req, res) => {
-  try {
-    // 1) ID prüfen
-    const idStr = (req.params.id || "").trim();
-    const id = Number(idStr);
-    if (!idStr || !Number.isInteger(id) || id <= 0) {
-      return res.status(400).json({ error: "Ungültige Tour-ID" });
-    }
-
-    // 2) Tour existiert?
-    const tour = await pool.query("SELECT id FROM touren WHERE id=$1", [id]);
-    if (tour.rows.length === 0) {
-      return res.status(404).json({ error: "Tour nicht gefunden" });
-    }
-
-    // 3) Stopps laden
-    const r = await pool.query(
-      "SELECT * FROM stopps s WHERE s.tour_id=$1 ORDER BY COALESCE(s.position, 2147483647) ASC, s.id ASC",
-      [id]
-    );
-
-    return res.json(r.rows);
-  } catch (e) {
-    // Log + echte DB-Fehlermeldung an Client zurückgeben (hilft bei 500)
-    console.error("❌ /touren/:id/stopps GET:", e.message);
-    return res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
-  }
-});
-
-// B) Stopp anlegen
-app.post("/stopps/:tour_id", auth, async (req, res) => {
-  const { tour_id } = req.params;
-  const {
-    kunde = null,
-    adresse = null,
-    telefon = null,
-    kommission = null,
-    hinweis = null,
-    position = null,
-  } = req.body || {};
-
-  try {
-    const r = await pool.query(
-      `INSERT INTO stopps (tour_id, kunde, adresse, telefon, kommission, hinweis, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [tour_id, kunde, adresse, telefon, kommission, hinweis, position]
-    );
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error("❌ /stopps/:tour_id POST:", e.message);
-    res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
-  }
-});
-
-// C) Stopp bearbeiten (alle Felder)
-app.patch("/stopps/:id", auth, async (req, res) => {
-  try {
-    const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
-    const sets = [];
-    const params = [];
-    let p = 1;
-    if (kunde !== undefined) { sets.push(`kunde=$${p++}`); params.push(kunde); }
-    if (adresse !== undefined) { sets.push(`adresse=$${p++}`); params.push(adresse); }
-    if (telefon !== undefined) { sets.push(`telefon=$${p++}`); params.push(telefon); }
-    if (kommission !== undefined) { sets.push(`kommission=$${p++}`); params.push(kommission); }
-    if (hinweis !== undefined) { sets.push(`hinweis=$${p++}`); params.push(hinweis); }
-    if (position !== undefined) { sets.push(`position=$${p++}`); params.push(position); }
-    if (anmerkung_fahrer !== undefined) { sets.push(`anmerkung_fahrer=$${p++}`); params.push(anmerkung_fahrer); }
-    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
-
-    params.push(req.params.id);
-    const sql = `UPDATE stopps SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
-    const r = await pool.query(sql, params);
-    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error("❌ /stopps/:id PATCH:", e.message);
-    res.status(500).json({ error: "Fehler beim Aktualisieren des Stopps" });
-  }
-});
-
-// D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
-app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
-  try {
-    const { anmerkung_fahrer } = req.body || {};
-    const r = await pool.query(
-      "UPDATE stopps SET anmerkung_fahrer=$1 WHERE id=$2 RETURNING *",
-      [anmerkung_fahrer ?? null, req.params.id]
-    );
-    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error("❌ /stopps/:id/anmerkung PATCH:", e.message);
-    res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
-  }
-});
-
-// E) Stopp löschen
-app.delete("/stopps/:id", auth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("❌ /stopps/:id DELETE:", e.message);
-    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
   }
 });
 
