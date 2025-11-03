@@ -1,11 +1,5 @@
 // server.js — Express + PostgreSQL + stabile JWT-Auth (optional deaktivierbar)
 // Node ≥ 18, ESM aktiv
-// Bestehendes API-Soll bleibt, zusätzlich Admin-Funktionen:
-// - GET /touren-admin           (Tourliste mit Filtern; pro Zeile 1 Tour)
-// - GET /touren/:id/stopps      (Stopps einer Tour)
-// - PATCH /stopps/:id           (einzelnen Stopp bearbeiten)
-// - PATCH /touren/:id           (Fahrer/Datum/Bemerkung ändern)
-// - DELETE /touren/:id          (Tour löschen; Stopps via CASCADE)
 
 import express from "express";
 import cors from "cors";
@@ -280,7 +274,7 @@ app.get("/touren-admin", auth, async (req, res) => {
   }
 });
 
-// Stopps einer Tour
+// --------- Stopps einer Tour (robust) ----------
 app.get("/touren/:id/stopps", auth, async (req, res) => {
   const { id } = req.params;
   try {
@@ -305,7 +299,7 @@ app.get("/touren/:id/stopps", auth, async (req, res) => {
   }
 });
 
-// Tour ändern (Fahrer/Datum/Bemerkung)
+// --------- Tour ändern / löschen ----------
 app.patch("/touren/:id", auth, async (req, res) => {
   try {
     const { fahrer_id, datum, bemerkung } = req.body || {};
@@ -327,7 +321,6 @@ app.patch("/touren/:id", auth, async (req, res) => {
   }
 });
 
-// Tour löschen (Stopps werden via ON DELETE CASCADE entfernt)
 app.delete("/touren/:id", auth, async (req, res) => {
   try {
     await pool.query("DELETE FROM touren WHERE id=$1", [req.params.id]);
@@ -363,7 +356,6 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
   }
 });
 
-// Stopp bearbeiten
 app.patch("/stopps/:id", auth, async (req, res) => {
   try {
     const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
@@ -398,7 +390,22 @@ app.delete("/stopps/:id", auth, async (req, res) => {
   }
 });
 
-// Foto upload/löschen (bestehend)
+// ---- Nur Anmerkung Fahrer separat (für Frontend /stopps/:id/anmerkung) ----
+app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
+  try {
+    const { anmerkung_fahrer } = req.body || {};
+    const r = await pool.query(
+      "UPDATE stopps SET anmerkung_fahrer=$1 WHERE id=$2 RETURNING *",
+      [anmerkung_fahrer ?? null, req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
+  }
+});
+
+// Foto upload/löschen
 app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
   try {
     const stoppId = req.params.id;
