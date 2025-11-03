@@ -41,7 +41,8 @@ const pool = new pg.Pool({
 // --------- Auth (JWT + optional deaktivierbar + Legacy-Token) ----------
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-render";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-const ALLOW_DEV_TOKEN = process.env.ALLOW_DEV_TOKEN !== "false";
+// Wenn ALLOW_DEV_TOKEN nicht gesetzt ist, standardmäßig false (sicher)
+const ALLOW_DEV_TOKEN = process.env.ALLOW_DEV_TOKEN === "true";
 
 const auth = (req, _res, next) => {
   if (process.env.DISABLE_AUTH === "true") return next();
@@ -153,6 +154,7 @@ app.get("/fahrer", auth, async (_req, res) => {
     const r = await pool.query("SELECT * FROM fahrer ORDER BY id ASC");
     res.json(r.rows);
   } catch (e) {
+    console.error("❌ /fahrer GET:", e.message);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
@@ -164,6 +166,7 @@ app.post("/fahrer", auth, async (req, res) => {
     const r = await pool.query("INSERT INTO fahrer (name) VALUES ($1) RETURNING *", [name]);
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ /fahrer POST:", e.message);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
   }
 });
@@ -173,6 +176,7 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
     await pool.query("DELETE FROM fahrer WHERE id=$1", [req.params.id]);
     res.json({ ok: true });
   } catch (e) {
+    console.error("❌ /fahrer DELETE:", e.message);
     res.status(500).json({ error: "Fehler beim Löschen des Fahrers" });
   }
 });
@@ -191,6 +195,7 @@ app.post("/touren", auth, async (req, res) => {
     );
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ /touren POST:", e.message);
     res.status(500).json({ error: "Fehler beim Anlegen der Tour" });
   }
 });
@@ -205,11 +210,12 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
     const tour = t.rows[0];
     const s = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC, id ASC",
+      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, 999999) ASC, id ASC",
       [tour.id]
     );
     res.json({ tour, stopps: s.rows });
   } catch (e) {
+    console.error("❌ /touren/:fahrer_id/:datum GET:", e.message);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
   }
 });
@@ -258,7 +264,7 @@ app.get("/touren-admin", auth, async (req, res) => {
         t.id, t.datum, t.fahrer_id, t.bemerkung,
         f.name AS fahrer_name,
         COUNT(s.id) AS stopps_count,
-        COALESCE(array_to_string((array_agg(s.kunde ORDER BY s.position NULLS LAST))[1:3], ', '), '') AS kunden_preview
+        COALESCE(array_to_string((array_agg(s.kunde ORDER BY COALESCE(s.position, 999999) ASC))[1:3], ', '), '') AS kunden_preview
       FROM touren t
       JOIN fahrer f ON f.id = t.fahrer_id
       LEFT JOIN stopps s ON s.tour_id = t.id
@@ -270,11 +276,16 @@ app.get("/touren-admin", auth, async (req, res) => {
     const r = await pool.query(sql, params);
     res.json(r.rows);
   } catch (e) {
+    console.error("❌ /touren-admin GET:", e.message);
     res.status(500).json({ error: "Fehler beim Laden der Touren (Admin)" });
   }
 });
 
-// --------- Stopps einer Tour (robust) ----------
+// ============================================================
+// ========== STOPPS ==========================================
+// ============================================================
+
+// (A) Stopps der Tour (robust, kein NULLS LAST erforderlich)
 app.get("/touren/:id/stopps", auth, async (req, res) => {
   const { id } = req.params;
   try {
@@ -288,51 +299,18 @@ app.get("/touren/:id/stopps", auth, async (req, res) => {
     }
 
     const r = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY position ASC NULLS LAST, id ASC",
+      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, 999999) ASC, id ASC",
       [id]
     );
 
     res.json(r.rows);
   } catch (e) {
-    console.error("❌ Fehler beim Laden der Stopps:", e.message, e.stack);
-    res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
+    console.error("❌ /touren/:id/stopps GET:", e.message);
+    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
   }
 });
 
-// --------- Tour ändern / löschen ----------
-app.patch("/touren/:id", auth, async (req, res) => {
-  try {
-    const { fahrer_id, datum, bemerkung } = req.body || {};
-    const sets = [];
-    const params = [];
-    let p = 1;
-    if (fahrer_id !== undefined) { sets.push(`fahrer_id=$${p++}`); params.push(fahrer_id); }
-    if (datum !== undefined) { sets.push(`datum=$${p++}`); params.push(datum); }
-    if (bemerkung !== undefined) { sets.push(`bemerkung=$${p++}`); params.push(bemerkung); }
-    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
-
-    params.push(req.params.id);
-    const sql = `UPDATE touren SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
-    const r = await pool.query(sql, params);
-    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
-    res.json(r.rows[0]);
-  } catch (e) {
-    res.status(500).json({ error: "Fehler beim Aktualisieren der Tour" });
-  }
-});
-
-app.delete("/touren/:id", auth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM touren WHERE id=$1", [req.params.id]);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: "Fehler beim Löschen der Tour" });
-  }
-});
-
-// ============================================================
-// ========== STOPPS ==========================================
-// ============================================================
+// (B) Stopp anlegen
 app.post("/stopps/:tour_id", auth, async (req, res) => {
   const { tour_id } = req.params;
   const {
@@ -352,10 +330,12 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
     );
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ /stopps/:tour_id POST:", e.message);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
   }
 });
 
+// (C) Stopp bearbeiten (alle Felder)
 app.patch("/stopps/:id", auth, async (req, res) => {
   try {
     const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
@@ -377,20 +357,12 @@ app.patch("/stopps/:id", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ /stopps/:id PATCH:", e.message);
     res.status(500).json({ error: "Fehler beim Aktualisieren des Stopps" });
   }
 });
 
-app.delete("/stopps/:id", auth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
-  }
-});
-
-// ---- Nur Anmerkung Fahrer separat (für Frontend /stopps/:id/anmerkung) ----
+// (D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
 app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
   try {
     const { anmerkung_fahrer } = req.body || {};
@@ -401,11 +373,25 @@ app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ /stopps/:id/anmerkung PATCH:", e.message);
     res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
   }
 });
 
-// Foto upload/löschen
+// (E) Stopp löschen
+app.delete("/stopps/:id", auth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /stopps/:id DELETE:", e.message);
+    res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
+  }
+});
+
+// ============================================================
+// ========== FOTO ============================================
+// ============================================================
 app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
   try {
     const stoppId = req.params.id;
@@ -420,6 +406,7 @@ app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ Foto-Upload:", e.message);
     res.status(500).json({ error: "Fehler beim Foto-Upload" });
   }
 });
@@ -442,6 +429,7 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
+    console.error("❌ Foto-Löschen:", e.message);
     res.status(500).json({ error: "Fehler beim Foto-Löschen" });
   }
 });
