@@ -41,7 +41,7 @@ const pool = new pg.Pool({
 // --------- Auth (JWT + optional deaktivierbar + Legacy-Token) ----------
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-render";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-// Wenn ALLOW_DEV_TOKEN nicht gesetzt ist, standardmäßig false (sicher)
+// Dev-Token nur wenn explizit gesetzt:
 const ALLOW_DEV_TOKEN = process.env.ALLOW_DEV_TOKEN === "true";
 
 const auth = (req, _res, next) => {
@@ -210,7 +210,7 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
     if (t.rows.length === 0) return res.json({ tour: null, stopps: [] });
     const tour = t.rows[0];
     const s = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, 999999) ASC, id ASC",
+      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, 2147483647) ASC, id ASC",
       [tour.id]
     );
     res.json({ tour, stopps: s.rows });
@@ -264,7 +264,7 @@ app.get("/touren-admin", auth, async (req, res) => {
         t.id, t.datum, t.fahrer_id, t.bemerkung,
         f.name AS fahrer_name,
         COUNT(s.id) AS stopps_count,
-        COALESCE(array_to_string((array_agg(s.kunde ORDER BY COALESCE(s.position, 999999) ASC))[1:3], ', '), '') AS kunden_preview
+        COALESCE(array_to_string((array_agg(s.kunde ORDER BY COALESCE(s.position, 2147483647) ASC))[1:3], ', '), '') AS kunden_preview
       FROM touren t
       JOIN fahrer f ON f.id = t.fahrer_id
       LEFT JOIN stopps s ON s.tour_id = t.id
@@ -285,32 +285,37 @@ app.get("/touren-admin", auth, async (req, res) => {
 // ========== STOPPS ==========================================
 // ============================================================
 
-// (A) Stopps der Tour (robust, kein NULLS LAST erforderlich)
+// A) Stopps einer Tour – robust & mit Klartext-Fehlern
 app.get("/touren/:id/stopps", auth, async (req, res) => {
-  const { id } = req.params;
   try {
-    if (!id || isNaN(Number(id))) {
+    // 1) ID prüfen
+    const idStr = (req.params.id || "").trim();
+    const id = Number(idStr);
+    if (!idStr || !Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Ungültige Tour-ID" });
     }
 
-    const tourCheck = await pool.query("SELECT id FROM touren WHERE id=$1", [id]);
-    if (tourCheck.rows.length === 0) {
+    // 2) Tour existiert?
+    const tour = await pool.query("SELECT id FROM touren WHERE id=$1", [id]);
+    if (tour.rows.length === 0) {
       return res.status(404).json({ error: "Tour nicht gefunden" });
     }
 
+    // 3) Stopps laden
     const r = await pool.query(
-      "SELECT * FROM stopps WHERE tour_id=$1 ORDER BY COALESCE(position, 999999) ASC, id ASC",
+      "SELECT * FROM stopps s WHERE s.tour_id=$1 ORDER BY COALESCE(s.position, 2147483647) ASC, s.id ASC",
       [id]
     );
 
-    res.json(r.rows);
+    return res.json(r.rows);
   } catch (e) {
+    // Log + echte DB-Fehlermeldung an Client zurückgeben (hilft bei 500)
     console.error("❌ /touren/:id/stopps GET:", e.message);
-    res.status(500).json({ error: "Fehler beim Laden der Stopps" });
+    return res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
   }
 });
 
-// (B) Stopp anlegen
+// B) Stopp anlegen
 app.post("/stopps/:tour_id", auth, async (req, res) => {
   const { tour_id } = req.params;
   const {
@@ -335,7 +340,7 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
   }
 });
 
-// (C) Stopp bearbeiten (alle Felder)
+// C) Stopp bearbeiten (alle Felder)
 app.patch("/stopps/:id", auth, async (req, res) => {
   try {
     const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
@@ -362,7 +367,7 @@ app.patch("/stopps/:id", auth, async (req, res) => {
   }
 });
 
-// (D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
+// D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
 app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
   try {
     const { anmerkung_fahrer } = req.body || {};
@@ -378,7 +383,7 @@ app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
   }
 });
 
-// (E) Stopp löschen
+// E) Stopp löschen
 app.delete("/stopps/:id", auth, async (req, res) => {
   try {
     await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
