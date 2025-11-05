@@ -15,14 +15,15 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 10000;
 
+// Proxy vertrauen (Render), damit X-Forwarded-Proto funktioniert
+app.set("trust proxy", true);
+
 app.use(cors());
 app.use(express.json());
 
-// --------- Uploads-Verzeichnis (Render: /tmp, lokal: ./uploads) ----------
-const DEFAULT_UPLOAD_DIR = fs.existsSync("/tmp") ? "/tmp/uploads" : "uploads";
-const uploadDir = process.env.UPLOADS_DIR || DEFAULT_UPLOAD_DIR;
-
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+// --------- Uploads-Verzeichnis ----------
+const uploadDir = path.resolve("uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 app.use("/uploads", express.static(uploadDir));
 
 // --------- Multer (lokale Ablage – OneDrive später) ----------
@@ -34,6 +35,13 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage });
+
+// Hilfsfunktion: Basis-URL korrekt inkl. HTTPS (hinter Proxy)
+function publicBase(req) {
+  const protoHeader = (req.headers["x-forwarded-proto"] || "").toString();
+  const proto = protoHeader ? protoHeader.split(",")[0].trim() : (req.protocol || "http");
+  return `${proto}://${req.get("host")}`;
+}
 
 // --------- PostgreSQL ----------
 const pool = new pg.Pool({
@@ -423,7 +431,7 @@ app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ error: "Kein Foto empfangen" });
 
-    const publicUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
+    const publicUrl = `${publicBase(req)}/uploads/${file.filename}`;
     const r = await pool.query("UPDATE stopps SET foto_url=$1 WHERE id=$2 RETURNING *", [
       publicUrl,
       stoppId,
@@ -502,14 +510,13 @@ app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
     );
     if (countRes.rows[0].cnt >= 3) {
       try {
-        const filename = file.filename;
-        const filePath = path.join(uploadDir, filename);
+        const filePath = path.join(uploadDir, file.filename);
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       } catch {}
       return res.status(400).json({ error: "Maximal 3 Fotos pro Stopp" });
     }
 
-    const publicUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
+    const publicUrl = `${publicBase(req)}/uploads/${file.filename}`;
     const ins = await pool.query(
       "INSERT INTO stopps_fotos (stopp_id, url) VALUES ($1,$2) RETURNING id, url, created_at",
       [stoppId, publicUrl]
@@ -521,8 +528,8 @@ app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
   }
 });
 
-// Ein Foto (aus Mehrfach) löschen — robustes URL-Parsing & tolerante Dateilöschung
-app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
+// Foto löschen — akzeptiert beide Pfade
+app.delete(["/stopps/fotos/:foto_id", "/stopps/:stopp_id/fotos/:foto_id"], auth, async (req, res) => {
   try {
     const { foto_id } = req.params;
 
@@ -531,7 +538,6 @@ app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
 
     const url = cur.rows[0].url;
 
-    // Datei-Pfad sicher bestimmen (funktioniert mit absoluter URL und Plain-Pfad)
     let filename = null;
     try {
       const u = new URL(url);
@@ -543,11 +549,7 @@ app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
     if (filename) {
       const filePath = path.join(uploadDir, filename);
       try {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        } else {
-          console.warn("⚠️ Datei existiert nicht (Mehrfach-Foto):", filePath);
-        }
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       } catch (e) {
         console.warn("⚠️ Datei konnte nicht gelöscht werden (Mehrfach-Foto):", e?.message);
       }
@@ -556,7 +558,7 @@ app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
     await pool.query("DELETE FROM stopps_fotos WHERE id=$1", [foto_id]);
     res.json({ ok: true });
   } catch (e) {
-    console.error("❌ /stopps/fotos/:foto_id DELETE:", e);
+    console.error("❌ Foto löschen:", e);
     res.status(500).json({ error: "Fehler beim Löschen des Fotos" });
   }
 });
