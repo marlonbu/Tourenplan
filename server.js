@@ -110,7 +110,12 @@ app.post("/login", (req, res) => {
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS anmerkung_fahrer TEXT DEFAULT NULL;
   `);
-  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer)");
+  // ⭐ NEU: Ankunft (frei beschreibbar, z. B. "10:00", "ca. 14:30–15:00")
+  await pool.query(`
+    ALTER TABLE stopps
+    ADD COLUMN IF NOT EXISTS ankunft TEXT DEFAULT NULL;
+  `);
+  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer & ankunft)");
 })().catch((e) => console.error("❌ DB-Init Fehler:", e));
 
 // --------- Debug/Service ----------
@@ -185,13 +190,14 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
     kommission = null,
     hinweis = null,
     position = null,
+    ankunft = null, // ⭐ NEU: annehmen
   } = req.body || {};
 
   try {
     const r = await pool.query(
-      `INSERT INTO stopps (tour_id, kunde, adresse, telefon, kommission, hinweis, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [tour_id, kunde, adresse, telefon, kommission, hinweis, position]
+      `INSERT INTO stopps (tour_id, kunde, adresse, telefon, kommission, hinweis, position, ankunft)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [tour_id, kunde, adresse, telefon, kommission, hinweis, position, ankunft]
     );
     res.json(r.rows[0]);
   } catch (e) {
@@ -203,10 +209,21 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
 // C) Stopp bearbeiten (alle Felder)
 app.patch("/stopps/:id", auth, async (req, res) => {
   try {
-    const { kunde, adresse, telefon, kommission, hinweis, position, anmerkung_fahrer } = req.body || {};
+    const {
+      kunde,
+      adresse,
+      telefon,
+      kommission,
+      hinweis,
+      position,
+      anmerkung_fahrer,
+      ankunft, // ⭐ NEU: updaten erlaubt
+    } = req.body || {};
+
     const sets = [];
     const params = [];
     let p = 1;
+
     if (kunde !== undefined) { sets.push(`kunde=$${p++}`); params.push(kunde); }
     if (adresse !== undefined) { sets.push(`adresse=$${p++}`); params.push(adresse); }
     if (telefon !== undefined) { sets.push(`telefon=$${p++}`); params.push(telefon); }
@@ -214,6 +231,8 @@ app.patch("/stopps/:id", auth, async (req, res) => {
     if (hinweis !== undefined) { sets.push(`hinweis=$${p++}`); params.push(hinweis); }
     if (position !== undefined) { sets.push(`position=$${p++}`); params.push(position); }
     if (anmerkung_fahrer !== undefined) { sets.push(`anmerkung_fahrer=$${p++}`); params.push(anmerkung_fahrer); }
+    if (ankunft !== undefined) { sets.push(`ankunft=$${p++}`); params.push(ankunft); } // ⭐ NEU
+
     if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
 
     params.push(req.params.id);
