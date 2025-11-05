@@ -422,6 +422,68 @@ app.get("/touren-admin", auth, async (req, res) => {
   }
 });
 
+// ---------- NEU: Tour bearbeiten (PATCH /touren/:id) ----------
+app.patch("/touren/:id", auth, async (req, res) => {
+  try {
+    const { fahrer_id, datum, bemerkung } = req.body || {};
+    const sets = [];
+    const params = [];
+    let p = 1;
+
+    if (fahrer_id !== undefined) { sets.push(`fahrer_id=$${p++}`); params.push(fahrer_id); }
+    if (datum !== undefined)     { sets.push(`datum=$${p++}`);     params.push(datum); }
+    if (bemerkung !== undefined) { sets.push(`bemerkung=$${p++}`); params.push(bemerkung); }
+
+    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
+
+    params.push(req.params.id);
+    const sql = `UPDATE touren SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
+    const r = await pool.query(sql, params);
+    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ /touren/:id PATCH:", e);
+    res.status(500).json({ error: "Fehler beim Aktualisieren der Tour" });
+  }
+});
+
+// ---------- NEU: Tour löschen (DELETE /touren/:id) ----------
+app.delete("/touren/:id", auth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const tourId = req.params.id;
+
+    // Optional: vorhandene Foto-Dateien der Stopps der Tour entfernen (tolerant)
+    const fotos = await client.query(
+      `SELECT sf.url
+       FROM stopps_fotos sf
+       JOIN stopps s ON s.id = sf.stopp_id
+       WHERE s.tour_id = $1`,
+      [tourId]
+    );
+    for (const row of fotos.rows || []) {
+      const url = row.url;
+      if (!url) continue;
+      let filename = null;
+      try { filename = path.basename(new URL(url).pathname); } catch { filename = path.basename(url); }
+      if (!filename) continue;
+      const filePath = path.join(uploadDir, filename);
+      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+    }
+
+    // Tour löschen (CASCADE entfernt Stopps & stopps_fotos)
+    const r = await client.query("DELETE FROM touren WHERE id=$1 RETURNING id", [tourId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /touren/:id DELETE:", e);
+    res.status(500).json({ error: "Fehler beim Löschen der Tour" });
+  } finally {
+    client.release();
+  }
+});
+
 // ============================================================
 // ========== FOTO (bestehend: Single-Foto an stopps.foto_url) =
 // ============================================================
