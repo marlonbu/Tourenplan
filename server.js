@@ -110,12 +110,22 @@ app.post("/login", (req, res) => {
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS anmerkung_fahrer TEXT DEFAULT NULL;
   `);
-  // ⭐ NEU (bereits vorhanden): Ankunft (frei beschreibbar)
   await pool.query(`
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS ankunft TEXT DEFAULT NULL;
   `);
-  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer & ankunft)");
+
+  // ⭐ NEU: eigene Fototabelle für bis zu 3 Fotos pro Stopp (bricht nichts)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stopps_fotos (
+      id SERIAL PRIMARY KEY,
+      stopp_id INT REFERENCES stopps(id) ON DELETE CASCADE,
+      url TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer, ankunft & stopps_fotos)");
 })().catch((e) => console.error("❌ DB-Init Fehler:", e));
 
 // --------- Debug/Service ----------
@@ -190,7 +200,7 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
     kommission = null,
     hinweis = null,
     position = null,
-    ankunft = null, // ⭐ NEU: annehmen
+    ankunft = null,
   } = req.body || {};
 
   try {
@@ -210,14 +220,8 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
 app.patch("/stopps/:id", auth, async (req, res) => {
   try {
     const {
-      kunde,
-      adresse,
-      telefon,
-      kommission,
-      hinweis,
-      position,
-      anmerkung_fahrer,
-      ankunft, // ⭐ NEU: updaten erlaubt
+      kunde, adresse, telefon, kommission, hinweis, position,
+      anmerkung_fahrer, ankunft,
     } = req.body || {};
 
     const sets = [];
@@ -231,7 +235,7 @@ app.patch("/stopps/:id", auth, async (req, res) => {
     if (hinweis !== undefined) { sets.push(`hinweis=$${p++}`); params.push(hinweis); }
     if (position !== undefined) { sets.push(`position=$${p++}`); params.push(position); }
     if (anmerkung_fahrer !== undefined) { sets.push(`anmerkung_fahrer=$${p++}`); params.push(anmerkung_fahrer); }
-    if (ankunft !== undefined) { sets.push(`ankunft=$${p++}`); params.push(ankunft); } // ⭐ NEU
+    if (ankunft !== undefined) { sets.push(`ankunft=$${p++}`); params.push(ankunft); }
 
     if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
 
@@ -246,7 +250,7 @@ app.patch("/stopps/:id", auth, async (req, res) => {
   }
 });
 
-// D) Nur „Anmerkung Fahrer“ separat (von deinem Frontend genutzt)
+// D) Nur „Anmerkung Fahrer“ separat
 app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
   try {
     const { anmerkung_fahrer } = req.body || {};
@@ -347,43 +351,6 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
   }
 });
 
-// ⭐⭐ NEU: Tour bearbeiten (von der Tourverwaltung genutzt)
-app.patch("/touren/:id", auth, async (req, res) => {
-  try {
-    const { fahrer_id, datum, bemerkung } = req.body || {};
-    const sets = [];
-    const params = [];
-    let p = 1;
-
-    if (fahrer_id !== undefined) { sets.push(`fahrer_id=$${p++}`); params.push(fahrer_id); }
-    if (datum !== undefined)     { sets.push(`datum=$${p++}`);     params.push(datum); }
-    if (bemerkung !== undefined) { sets.push(`bemerkung=$${p++}`); params.push(bemerkung); }
-
-    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
-
-    params.push(req.params.id);
-    const sql = `UPDATE touren SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
-    const r = await pool.query(sql, params);
-    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
-    res.json(r.rows[0]);
-  } catch (e) {
-    console.error("❌ /touren/:id PATCH:", e.message);
-    res.status(500).json({ error: "Fehler beim Aktualisieren der Tour" });
-  }
-});
-
-// ⭐⭐ NEU: Tour löschen (von der Tourverwaltung genutzt)
-app.delete("/touren/:id", auth, async (req, res) => {
-  try {
-    const r = await pool.query("DELETE FROM touren WHERE id=$1 RETURNING id", [req.params.id]);
-    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("❌ /touren/:id DELETE:", e.message);
-    res.status(500).json({ error: "Fehler beim Löschen der Tour" });
-  }
-});
-
 // Admin-Liste: Touren (mit Filtern)
 function isoWeekToRange(kwStr) {
   const m = /^(\d{4})-W(\d{2})$/.exec(kwStr || "");
@@ -446,7 +413,7 @@ app.get("/touren-admin", auth, async (req, res) => {
 });
 
 // ============================================================
-// ========== FOTO ============================================
+// ========== FOTO (bestehend: Single-Foto an stopps.foto_url) =
 // ============================================================
 app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
   try {
@@ -487,6 +454,83 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ Foto-Löschen:", e.message);
     res.status(500).json({ error: "Fehler beim Foto-Löschen" });
+  }
+});
+
+// ============================================================
+// ========== MEHRFACH-FOTOS (NEU; bis zu 3 pro Stopp) ========
+// ============================================================
+
+// Liste aller Fotos eines Stopps
+app.get("/stopps/:id/fotos", auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query(
+      "SELECT id, url, created_at FROM stopps_fotos WHERE stopp_id=$1 ORDER BY id ASC",
+      [id]
+    );
+    res.json(r.rows);
+  } catch (e) {
+    console.error("❌ /stopps/:id/fotos GET:", e.message);
+    res.status(500).json({ error: "Fehler beim Laden der Fotos" });
+  }
+});
+
+// Neues Foto zu einem Stopp (max 3)
+app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
+  try {
+    const stoppId = req.params.id;
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "Kein Foto empfangen" });
+
+    // Max 3 prüfen
+    const countRes = await pool.query(
+      "SELECT COUNT(*)::int AS cnt FROM stopps_fotos WHERE stopp_id=$1",
+      [stoppId]
+    );
+    if (countRes.rows[0].cnt >= 3) {
+      // Datei gleich wieder löschen, wenn wir sie schon auf Platte haben
+      try {
+        const filename = file.filename;
+        const filePath = path.join("uploads", filename);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {}
+      return res.status(400).json({ error: "Maximal 3 Fotos pro Stopp" });
+    }
+
+    const publicUrl = `${req.protocol}://${req.get("host")}/uploads/${file.filename}`;
+    const ins = await pool.query(
+      "INSERT INTO stopps_fotos (stopp_id, url) VALUES ($1,$2) RETURNING id, url, created_at",
+      [stoppId, publicUrl]
+    );
+    res.json(ins.rows[0]);
+  } catch (e) {
+    console.error("❌ /stopps/:id/fotos POST:", e.message);
+    res.status(500).json({ error: "Fehler beim Foto-Upload" });
+  }
+});
+
+// Ein Foto (aus Mehrfach) löschen
+app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
+  try {
+    const { foto_id } = req.params;
+    const cur = await pool.query("SELECT url FROM stopps_fotos WHERE id=$1", [foto_id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: "Foto nicht gefunden" });
+
+    const url = cur.rows[0].url;
+    if (url) {
+      const filename = path.basename(url);
+      const filePath = path.join("uploads", filename);
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch {}
+      }
+    }
+
+    await pool.query("DELETE FROM stopps_fotos WHERE id=$1", [foto_id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /stopps/fotos/:foto_id DELETE:", e.message);
+    res.status(500).json({ error: "Fehler beim Löschen des Fotos" });
   }
 });
 
