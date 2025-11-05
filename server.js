@@ -18,13 +18,16 @@ const port = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// --------- Uploads-Verzeichnis ----------
-if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
-app.use("/uploads", express.static("uploads"));
+// --------- Uploads-Verzeichnis (Render: /tmp, lokal: ./uploads) ----------
+const DEFAULT_UPLOAD_DIR = fs.existsSync("/tmp") ? "/tmp/uploads" : "uploads";
+const uploadDir = process.env.UPLOADS_DIR || DEFAULT_UPLOAD_DIR;
+
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+app.use("/uploads", express.static(uploadDir));
 
 // --------- Multer (lokale Ablage – OneDrive später) ----------
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, "uploads/"),
+  destination: (_req, _file, cb) => cb(null, uploadDir),
   filename: (_req, file, cb) => {
     const safe = file.originalname.replace(/\s+/g, "_");
     cb(null, `${Date.now()}-${safe}`);
@@ -442,15 +445,13 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
     if (url) {
       let filename = null;
       try {
-        // URL robust extrahieren
         const u = new URL(url);
         filename = path.basename(u.pathname);
       } catch {
-        // Fallback, falls es keine absolute URL ist
         filename = path.basename(url);
       }
       if (filename) {
-        const filePath = path.join("uploads", filename);
+        const filePath = path.join(uploadDir, filename);
         try {
           if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         } catch (e) {
@@ -502,7 +503,7 @@ app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
     if (countRes.rows[0].cnt >= 3) {
       try {
         const filename = file.filename;
-        const filePath = path.join("uploads", filename);
+        const filePath = path.join(uploadDir, filename);
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
       } catch {}
       return res.status(400).json({ error: "Maximal 3 Fotos pro Stopp" });
@@ -540,16 +541,14 @@ app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
     }
 
     if (filename) {
-      const filePath = path.join("uploads", filename);
+      const filePath = path.join(uploadDir, filename);
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
         } else {
-          // auf Render kann die Datei bereits nicht mehr existieren → kein Fehler
           console.warn("⚠️ Datei existiert nicht (Mehrfach-Foto):", filePath);
         }
       } catch (e) {
-        // keine harte Fehlermeldung, DB wird trotzdem bereinigt
         console.warn("⚠️ Datei konnte nicht gelöscht werden (Mehrfach-Foto):", e?.message);
       }
     }
