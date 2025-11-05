@@ -114,8 +114,7 @@ app.post("/login", (req, res) => {
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS ankunft TEXT DEFAULT NULL;
   `);
-
-  // ⭐ NEU: eigene Fototabelle für bis zu 3 Fotos pro Stopp (bricht nichts)
+  // Mehrfach-Fotos (bis zu 3 pro Stopp)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS stopps_fotos (
       id SERIAL PRIMARY KEY,
@@ -185,7 +184,7 @@ app.get("/touren/:id/stopps", auth, async (req, res) => {
     );
     return res.json(r.rows);
   } catch (e) {
-    console.error("❌ /touren/:id/stopps GET:", e.message);
+    console.error("❌ /touren/:id/stopps GET:", e);
     return res.status(500).json({ error: e.message || "Fehler beim Laden der Stopps" });
   }
 });
@@ -211,7 +210,7 @@ app.post("/stopps/:tour_id", auth, async (req, res) => {
     );
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ /stopps/:tour_id POST:", e.message);
+    console.error("❌ /stopps/:tour_id POST:", e);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Stopps" });
   }
 });
@@ -245,7 +244,7 @@ app.patch("/stopps/:id", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ /stopps/:id PATCH:", e.message);
+    console.error("❌ /stopps/:id PATCH:", e);
     res.status(500).json({ error: "Fehler beim Aktualisieren des Stopps" });
   }
 });
@@ -261,7 +260,7 @@ app.patch("/stopps/:id/anmerkung", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ /stopps/:id/anmerkung PATCH:", e.message);
+    console.error("❌ /stopps/:id/anmerkung PATCH:", e);
     res.status(500).json({ error: "Fehler beim Speichern der Anmerkung" });
   }
 });
@@ -272,7 +271,7 @@ app.delete("/stopps/:id", auth, async (req, res) => {
     await pool.query("DELETE FROM stopps WHERE id=$1", [req.params.id]);
     res.json({ ok: true });
   } catch (e) {
-    console.error("❌ /stopps/:id DELETE:", e.message);
+    console.error("❌ /stopps/:id DELETE:", e);
     res.status(500).json({ error: "Fehler beim Löschen des Stopps" });
   }
 });
@@ -285,7 +284,7 @@ app.get("/fahrer", auth, async (_req, res) => {
     const r = await pool.query("SELECT * FROM fahrer ORDER BY id ASC");
     res.json(r.rows);
   } catch (e) {
-    console.error("❌ /fahrer GET:", e.message);
+    console.error("❌ /fahrer GET:", e);
     res.status(500).json({ error: "Fehler beim Laden der Fahrer" });
   }
 });
@@ -297,7 +296,7 @@ app.post("/fahrer", auth, async (req, res) => {
     const r = await pool.query("INSERT INTO fahrer (name) VALUES ($1) RETURNING *", [name]);
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ /fahrer POST:", e.message);
+    console.error("❌ /fahrer POST:", e);
     res.status(500).json({ error: "Fehler beim Hinzufügen des Fahrers" });
   }
 });
@@ -307,7 +306,7 @@ app.delete("/fahrer/:id", auth, async (req, res) => {
     await pool.query("DELETE FROM fahrer WHERE id=$1", [req.params.id]);
     res.json({ ok: true });
   } catch (e) {
-    console.error("❌ /fahrer DELETE:", e.message);
+    console.error("❌ /fahrer DELETE:", e);
     res.status(500).json({ error: "Fehler beim Löschen des Fahrers" });
   }
 });
@@ -326,7 +325,7 @@ app.post("/touren", auth, async (req, res) => {
     );
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ /touren POST:", e.message);
+    console.error("❌ /touren POST:", e);
     res.status(500).json({ error: "Fehler beim Anlegen der Tour" });
   }
 });
@@ -346,7 +345,7 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
     );
     res.json({ tour, stopps: s.rows });
   } catch (e) {
-    console.error("❌ /touren/:fahrer_id/:datum GET:", e.message);
+    console.error("❌ /touren/:fahrer_id/:datum GET:", e);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
   }
 });
@@ -407,7 +406,7 @@ app.get("/touren-admin", auth, async (req, res) => {
     const r = await pool.query(sql, params);
     res.json(r.rows);
   } catch (e) {
-    console.error("❌ /touren-admin GET:", e.message);
+    console.error("❌ /touren-admin GET:", e);
     res.status(500).json({ error: "Fehler beim Laden der Touren (Admin)" });
   }
 });
@@ -429,7 +428,7 @@ app.post("/stopps/:id/foto", auth, upload.single("foto"), async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ Foto-Upload:", e.message);
+    console.error("❌ Foto-Upload:", e);
     res.status(500).json({ error: "Fehler beim Foto-Upload" });
   }
 });
@@ -441,10 +440,22 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
     const url = cur.rows[0]?.foto_url;
 
     if (url) {
-      const filename = path.basename(url);
-      const filePath = path.join("uploads", filename);
-      if (fs.existsSync(filePath)) {
-        try { fs.unlinkSync(filePath); } catch {}
+      let filename = null;
+      try {
+        // URL robust extrahieren
+        const u = new URL(url);
+        filename = path.basename(u.pathname);
+      } catch {
+        // Fallback, falls es keine absolute URL ist
+        filename = path.basename(url);
+      }
+      if (filename) {
+        const filePath = path.join("uploads", filename);
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } catch (e) {
+          console.warn("⚠️ Datei konnte nicht gelöscht werden (Single-Foto):", e?.message);
+        }
       }
     }
 
@@ -452,7 +463,7 @@ app.delete("/stopps/:id/foto", auth, async (req, res) => {
     if (r.rows.length === 0) return res.status(404).json({ error: "Stopp nicht gefunden" });
     res.json(r.rows[0]);
   } catch (e) {
-    console.error("❌ Foto-Löschen:", e.message);
+    console.error("❌ Foto-Löschen (Single):", e);
     res.status(500).json({ error: "Fehler beim Foto-Löschen" });
   }
 });
@@ -471,7 +482,7 @@ app.get("/stopps/:id/fotos", auth, async (req, res) => {
     );
     res.json(r.rows);
   } catch (e) {
-    console.error("❌ /stopps/:id/fotos GET:", e.message);
+    console.error("❌ /stopps/:id/fotos GET:", e);
     res.status(500).json({ error: "Fehler beim Laden der Fotos" });
   }
 });
@@ -489,7 +500,6 @@ app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
       [stoppId]
     );
     if (countRes.rows[0].cnt >= 3) {
-      // Datei gleich wieder löschen, wenn wir sie schon auf Platte haben
       try {
         const filename = file.filename;
         const filePath = path.join("uploads", filename);
@@ -505,31 +515,49 @@ app.post("/stopps/:id/fotos", auth, upload.single("foto"), async (req, res) => {
     );
     res.json(ins.rows[0]);
   } catch (e) {
-    console.error("❌ /stopps/:id/fotos POST:", e.message);
+    console.error("❌ /stopps/:id/fotos POST:", e);
     res.status(500).json({ error: "Fehler beim Foto-Upload" });
   }
 });
 
-// Ein Foto (aus Mehrfach) löschen
+// Ein Foto (aus Mehrfach) löschen — robustes URL-Parsing & tolerante Dateilöschung
 app.delete("/stopps/fotos/:foto_id", auth, async (req, res) => {
   try {
     const { foto_id } = req.params;
+
     const cur = await pool.query("SELECT url FROM stopps_fotos WHERE id=$1", [foto_id]);
     if (cur.rows.length === 0) return res.status(404).json({ error: "Foto nicht gefunden" });
 
     const url = cur.rows[0].url;
-    if (url) {
-      const filename = path.basename(url);
+
+    // Datei-Pfad sicher bestimmen (funktioniert mit absoluter URL und Plain-Pfad)
+    let filename = null;
+    try {
+      const u = new URL(url);
+      filename = path.basename(u.pathname);
+    } catch {
+      filename = path.basename(url);
+    }
+
+    if (filename) {
       const filePath = path.join("uploads", filename);
-      if (fs.existsSync(filePath)) {
-        try { fs.unlinkSync(filePath); } catch {}
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        } else {
+          // auf Render kann die Datei bereits nicht mehr existieren → kein Fehler
+          console.warn("⚠️ Datei existiert nicht (Mehrfach-Foto):", filePath);
+        }
+      } catch (e) {
+        // keine harte Fehlermeldung, DB wird trotzdem bereinigt
+        console.warn("⚠️ Datei konnte nicht gelöscht werden (Mehrfach-Foto):", e?.message);
       }
     }
 
     await pool.query("DELETE FROM stopps_fotos WHERE id=$1", [foto_id]);
     res.json({ ok: true });
   } catch (e) {
-    console.error("❌ /stopps/fotos/:foto_id DELETE:", e.message);
+    console.error("❌ /stopps/fotos/:foto_id DELETE:", e);
     res.status(500).json({ error: "Fehler beim Löschen des Fotos" });
   }
 });
