@@ -110,7 +110,7 @@ app.post("/login", (req, res) => {
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS anmerkung_fahrer TEXT DEFAULT NULL;
   `);
-  // ⭐ NEU: Ankunft (frei beschreibbar, z. B. "10:00", "ca. 14:30–15:00")
+  // ⭐ NEU (bereits vorhanden): Ankunft (frei beschreibbar)
   await pool.query(`
     ALTER TABLE stopps
     ADD COLUMN IF NOT EXISTS ankunft TEXT DEFAULT NULL;
@@ -344,6 +344,43 @@ app.get("/touren/:fahrer_id/:datum", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ /touren/:fahrer_id/:datum GET:", e.message);
     res.status(500).json({ error: "Fehler beim Laden der Tour" });
+  }
+});
+
+// ⭐⭐ NEU: Tour bearbeiten (von der Tourverwaltung genutzt)
+app.patch("/touren/:id", auth, async (req, res) => {
+  try {
+    const { fahrer_id, datum, bemerkung } = req.body || {};
+    const sets = [];
+    const params = [];
+    let p = 1;
+
+    if (fahrer_id !== undefined) { sets.push(`fahrer_id=$${p++}`); params.push(fahrer_id); }
+    if (datum !== undefined)     { sets.push(`datum=$${p++}`);     params.push(datum); }
+    if (bemerkung !== undefined) { sets.push(`bemerkung=$${p++}`); params.push(bemerkung); }
+
+    if (sets.length === 0) return res.status(400).json({ error: "Keine Änderungen übergeben" });
+
+    params.push(req.params.id);
+    const sql = `UPDATE touren SET ${sets.join(", ")} WHERE id=$${p} RETURNING *`;
+    const r = await pool.query(sql, params);
+    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error("❌ /touren/:id PATCH:", e.message);
+    res.status(500).json({ error: "Fehler beim Aktualisieren der Tour" });
+  }
+});
+
+// ⭐⭐ NEU: Tour löschen (von der Tourverwaltung genutzt)
+app.delete("/touren/:id", auth, async (req, res) => {
+  try {
+    const r = await pool.query("DELETE FROM touren WHERE id=$1 RETURNING id", [req.params.id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: "Tour nicht gefunden" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /touren/:id DELETE:", e.message);
+    res.status(500).json({ error: "Fehler beim Löschen der Tour" });
   }
 });
 
