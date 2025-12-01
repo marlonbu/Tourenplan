@@ -135,7 +135,16 @@ app.post("/login", (req, res) => {
     );
   `);
 
-  console.log("✅ Tabellen bereit (inkl. anmerkung_fahrer, ankunft & stopps_fotos)");
+  // 🔸 NEU: Persistente Sortierung für Touren
+  await pool.query(`
+    ALTER TABLE touren
+    ADD COLUMN IF NOT EXISTS sort_index INT NULL;
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS touren_sort_index_idx ON touren(sort_index);
+  `);
+
+  console.log("✅ Tabellen bereit (inkl. sort_index, anmerkung_fahrer, ankunft & stopps_fotos)");
 })().catch((e) => console.error("❌ DB-Init Fehler:", e));
 
 // --------- Debug/Service ----------
@@ -402,7 +411,7 @@ app.get("/touren-admin", auth, async (req, res) => {
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const sql = `
       SELECT
-        t.id, t.datum, t.fahrer_id, t.bemerkung,
+        t.id, t.datum, t.fahrer_id, t.bemerkung, t.sort_index,
         f.name AS fahrer_name,
         COUNT(s.id) AS stopps_count,
         COALESCE(array_to_string((array_agg(s.kunde ORDER BY COALESCE(s.position, 2147483647) ASC))[1:3], ', '), '') AS kunden_preview
@@ -411,7 +420,7 @@ app.get("/touren-admin", auth, async (req, res) => {
       LEFT JOIN stopps s ON s.tour_id = t.id
       ${whereSql}
       GROUP BY t.id, f.id
-      ORDER BY t.datum ASC, f.name ASC, t.id ASC
+      ORDER BY COALESCE(t.sort_index, 2147483647) ASC, t.datum ASC, f.name ASC, t.id ASC
       LIMIT 2000
     `;
     const r = await pool.query(sql, params);
@@ -481,6 +490,37 @@ app.delete("/touren/:id", auth, async (req, res) => {
     res.status(500).json({ error: "Fehler beim Löschen der Tour" });
   } finally {
     client.release();
+  }
+});
+
+// ---------- NEU: Reihenfolge speichern (Spotify-Style) ----------
+app.post("/touren-admin/reorder", auth, async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+    if (!ids || ids.length === 0) return res.status(400).json({ error: "ids[] erforderlich" });
+    if (!ids.every((x) => Number.isInteger(x) && x > 0)) {
+      return res.status(400).json({ error: "ids[] muss aus positiven Integern bestehen" });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Setze nur übergebene IDs – andere Touren behalten ihren sort_index
+      for (let i = 0; i < ids.length; i++) {
+        await client.query("UPDATE touren SET sort_index=$1 WHERE id=$2", [i, ids[i]]);
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /touren-admin/reorder POST:", e);
+    res.status(500).json({ error: "Reihenfolge konnte nicht gespeichert werden" });
   }
 });
 
